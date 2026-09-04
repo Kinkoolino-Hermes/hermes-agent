@@ -327,6 +327,33 @@ def test_scheduler_does_not_register_failed_matrix_send_with_event_id(
     assert not _registry_path().exists()
 
 
+def test_scheduler_does_not_register_filtered_matrix_send_with_event_id(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import _registry_path
+    from cron.scheduler import _register_matrix_digest_details_if_applicable
+    from gateway.config import Platform
+
+    send_result = {
+        "success": True,
+        "delivered": False,
+        "message_id": "$filtered-digest",
+    }
+    job = {"id": "digest-job", "name": "Morning Digest", "context_from": ["source-a"]}
+
+    _register_matrix_digest_details_if_applicable(
+        job=job,
+        platform=Platform.MATRIX,
+        chat_id="!room:example.org",
+        send_result=send_result,
+        output_file=tmp_path / "cron" / "output" / "digest-job" / "latest.md",
+    )
+
+    assert not _registry_path().exists()
+
+
 def test_scheduler_does_not_register_non_digest_matrix_delivery(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
