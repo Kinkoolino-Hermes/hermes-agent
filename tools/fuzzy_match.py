@@ -57,11 +57,70 @@ UNICODE_MAP = {
     "\u3000": " ",  # ideographic (CJK full-width) space
 }
 
+IDENTICAL_STRINGS_ERROR = (
+    "No edit was applied because old_string and new_string are identical. "
+    "Provide the existing text to replace in old_string and the changed "
+    "replacement text in new_string."
+)
+
+
 def _unicode_normalize(text: str) -> str:
     """Normalizes Unicode characters to their standard ASCII equivalents."""
     for char, repl in UNICODE_MAP.items():
         text = text.replace(char, repl)
     return text
+
+
+def is_already_applied(content: str, old_string: str, new_string: str) -> bool:
+    """Return True when the requested edit is already present in the file.
+
+    Production trajectory mining shows the most common patch failure is a
+    re-send of an edit that already landed (old_string == new_string, or
+    old_string gone while new_string is present) — the model's intent is
+    "make the file contain this text", and it already does. Callers use
+    this to convert those errors into an explicit success-shaped no-op so
+    the model moves on instead of re-reading and re-patching.
+
+    Deliberately conservative:
+    - new_string must be non-trivial (>= 8 chars stripped) — a tiny target
+      matching by coincidence must not mask a genuine typo'd edit;
+    - new_string must appear EXACTLY in the content (no fuzzy matching —
+      approximate presence is not proof the edit landed);
+    - when old_string differs from new_string, old_string must be GONE
+      (still-present old text means the edit is at best half-applied).
+    """
+    if not new_string or len(new_string.strip()) < 8:
+        return False
+    if new_string not in content:
+        return False
+    if old_string == new_string:
+        return True
+    return old_string not in content
+
+
+def _format_match_locations(content: str, matches: List[Tuple[int, int]],
+                            cap: int = 5) -> str:
+    """Render up to ``cap`` match positions as 'L<line>: <snippet>' rows.
+
+    Gives the model the information it needs to disambiguate an ambiguous
+    old_string in ONE follow-up (add neighboring context, or choose
+    replace_all) instead of re-reading the file to find the occurrences.
+    """
+    rows = []
+    for start, _end in matches[:cap]:
+        line_no = content.count("\n", 0, start) + 1
+        line_start = content.rfind("\n", 0, start) + 1
+        line_end = content.find("\n", line_start)
+        if line_end == -1:
+            line_end = len(content)
+        snippet = content[line_start:line_end].strip()
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        rows.append(f"  L{line_no}: {snippet}")
+    extra = len(matches) - cap
+    if extra > 0:
+        rows.append(f"  ... and {extra} more")
+    return "\n".join(rows)
 
 
 def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
@@ -91,7 +150,7 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
         return content, 0, None, "old_string is only whitespace — provide non-blank text to match"
 
     if old_string == new_string:
-        return content, 0, None, "old_string and new_string are identical"
+        return content, 0, None, IDENTICAL_STRINGS_ERROR
 
     # Try each matching strategy in order
     strategies: List[Tuple[str, Callable]] = [
@@ -119,9 +178,11 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
         if matches:
             # Found matches with this strategy
             if len(matches) > 1 and not replace_all:
+                locations = _format_match_locations(content, matches)
                 return content, 0, None, (
                     f"Found {len(matches)} matches for old_string. "
-                    f"Provide more context to make it unique, or use replace_all=True."
+                    f"Provide more context to make it unique, or use replace_all=True. "
+                    f"Matches:\n{locations}"
                 )
 
             # replace_all with a similarity-based strategy would overwrite
@@ -213,9 +274,11 @@ def _detect_escape_drift(content: str, matches: List[Tuple[int, int]],
     Returns an error string if drift is detected, None otherwise.
     """
     # Cheap pre-check: bail out unless new_string actually contains a
-    # suspect escape sequence. This keeps the guard free for all the
-    # common, correct cases.
-    if "\\'" not in new_string and '\\"' not in new_string:
+    # suspect escape sequence or any backslash at all (the doubling guard
+    # below only matters when backslashes are present). This keeps the
+    # guard free for all the common, correct cases.
+    has_quote_suspects = "\\'" in new_string or '\\"' in new_string
+    if not has_quote_suspects and "\\" not in old_string:
         return None
 
     # Aggregate matched regions of the file — that's what new_string will
@@ -224,19 +287,89 @@ def _detect_escape_drift(content: str, matches: List[Tuple[int, int]],
     # escaped strings); accept the patch.
     matched_regions = "".join(content[start:end] for start, end in matches)
 
-    for suspect in ("\\'", '\\"'):
-        if suspect in new_string and suspect in old_string and suspect not in matched_regions:
-            plain = suspect[1]  # "'" or '"'
-            return (
-                f"Escape-drift detected: old_string and new_string contain "
-                f"the literal sequence {suspect!r} but the matched region of "
-                f"the file does not. This is almost always a tool-call "
-                f"serialization artifact where an apostrophe or quote got "
-                f"prefixed with a spurious backslash. Re-read the file with "
-                f"read_file and pass old_string/new_string without "
-                f"backslash-escaping {plain!r} characters."
-            )
+    if has_quote_suspects:
+        for suspect in ("\\'", '\\"'):
+            if suspect in new_string and suspect in old_string and suspect not in matched_regions:
+                plain = suspect[1]  # "'" or '"'
+                return (
+                    f"Escape-drift detected: old_string and new_string contain "
+                    f"the literal sequence {suspect!r} but the matched region of "
+                    f"the file does not. This is almost always a tool-call "
+                    f"serialization artifact where an apostrophe or quote got "
+                    f"prefixed with a spurious backslash. Re-read the file with "
+                    f"read_file and pass old_string/new_string without "
+                    f"backslash-escaping {plain!r} characters."
+                )
+
+    # Backslash-run doubling: the model sent old_string with 2x the
+    # backslashes the file actually has (JSON string double-escaping —
+    # source text `\\` arrives as `\\\\`). A similarity strategy can match
+    # the region anyway, and writing new_string verbatim then doubles every
+    # backslash run in the file (`C:\\Users` becomes `C:\\\\Users`).
+    # Detect the halving relationship between the shared (unchanged) text
+    # of old_string and the matched region and block with guidance rather
+    # than silently corrupting escape sequences.
+    drift = _detect_backslash_doubling(matched_regions, old_string, new_string)
+    if drift:
+        return drift
     return None
+
+
+def _backslash_runs(s: str) -> List[int]:
+    """Return the lengths of maximal backslash runs in ``s``, in order."""
+    runs: List[int] = []
+    n = 0
+    for ch in s:
+        if ch == "\\":
+            n += 1
+        elif n:
+            runs.append(n)
+            n = 0
+    if n:
+        runs.append(n)
+    return runs
+
+
+def _detect_backslash_doubling(matched_regions: str, old_string: str,
+                               new_string: str) -> Optional[str]:
+    """Detect JSON double-escaped backslashes in old_string/new_string.
+
+    Fires when every backslash run in old_string is exactly twice the
+    length of the corresponding run in the matched file region (with the
+    same number of runs, and at least one run of length >= 2 so a single
+    doubled backslash in prose can't trigger it). That pattern means the
+    tool-call arguments went through an extra JSON-escaping pass; writing
+    new_string verbatim would double every backslash in the file.
+    """
+    old_runs = _backslash_runs(old_string)
+    file_runs = _backslash_runs(matched_regions)
+    if not old_runs or not file_runs or len(old_runs) != len(file_runs):
+        return None
+    if old_runs == file_runs:
+        return None
+    # Every old run must be exactly double its file counterpart, and the
+    # doubling must be non-trivial (>= 2 backslashes in the file) for at
+    # least one run — a lone `\` vs `\\` is too weak a signal on its own
+    # unless it is consistent across 2+ runs.
+    if any(o != f * 2 for o, f in zip(old_runs, file_runs)):
+        return None
+    if not (any(f >= 2 for f in file_runs) or len(file_runs) >= 2):
+        return None
+    # new_string must exhibit the same doubling (the model copy-pasted the
+    # doubled form); if it already matches the file's counts, writing it is
+    # harmless and we let the edit through.
+    new_runs = _backslash_runs(new_string)
+    if new_runs == file_runs:
+        return None
+    return (
+        "Escape-drift detected: every backslash run in old_string is exactly "
+        "twice as long as in the matched region of the file (e.g. the file "
+        "has `\\\\` where old_string has `\\\\\\\\`). The tool-call arguments "
+        "were JSON-escaped one extra time; applying new_string verbatim would "
+        "double every backslash in the file. Re-read the file with read_file "
+        "and resend old_string/new_string with the backslash counts exactly "
+        "as they appear in the file."
+    )
 
 
 def _leading_whitespace(line: str) -> str:
@@ -941,6 +1074,20 @@ def _map_normalized_positions(original: str, normalized: str,
     return original_matches
 
 
+def _visualize_whitespace(line: str) -> str:
+    """Render leading whitespace visibly (→ = tab, · = space).
+
+    Only the leading run is visualized — interior spacing is rarely the
+    culprit and full visualization makes lines unreadable.
+    """
+    i = 0
+    prefix = []
+    while i < len(line) and line[i] in (" ", "\t"):
+        prefix.append("→" if line[i] == "\t" else "·")
+        i += 1
+    return "".join(prefix) + line[i:]
+
+
 def find_closest_lines(old_string: str, content: str, context_lines: int = 2, max_results: int = 3) -> str:
     """Find lines in content most similar to old_string for "did you mean?" feedback.
 
@@ -1000,7 +1147,23 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
     if not parts:
         return ""
 
-    return "\n---\n".join(parts)
+    result = "\n---\n".join(parts)
+
+    # Whitespace diagnosis (pattern from crush's diagnoseMismatch): when the
+    # best candidate line matches the anchor after stripping but differs in
+    # raw text, the failure is whitespace-shaped. Show BOTH lines with
+    # leading whitespace made visible so the model can copy the file's
+    # exact indentation instead of guessing again.
+    best_line = content_lines[top[0][1]]
+    if best_line.strip() == anchor and best_line != old_lines[0]:
+        result += (
+            "\n\nWhitespace difference detected (→ = tab, · = space):\n"
+            f"  file has: {_visualize_whitespace(best_line)}\n"
+            f"  you sent: {_visualize_whitespace(old_lines[0])}\n"
+            "Use the exact whitespace shown in 'file has'."
+        )
+
+    return result
 
 
 def format_no_match_hint(error: Optional[str], match_count: int,

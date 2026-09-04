@@ -56,7 +56,37 @@ LOCKOUT_SECONDS = 3600              # Lockout duration after too many failures
 MAX_PENDING_PER_PLATFORM = 3        # Max pending codes per platform
 MAX_FAILED_ATTEMPTS = 5             # Failed approvals before lockout
 
-PAIRING_DIR = get_hermes_dir("platforms/pairing", "pairing")
+# Default (non-profile-scoped) pairing directory. Left unresolved (``None``)
+# here rather than computed eagerly: this module is imported once by the
+# long-lived gateway process at container/process boot, and computing the
+# path eagerly freezes it to whatever HERMES_HOME/profile context existed
+# at that exact import moment for the rest of the process's lifetime --
+# even if a context-local override (see hermes_constants.set_hermes_home_override)
+# is established afterward. A freshly-started, short-lived process (e.g. the
+# ``hermes pairing`` CLI) re-imports this module later with the final
+# environment already in place, so it never observes the stale value -- the
+# resulting asymmetry is what made pending pairing codes issued by the
+# gateway unrecoverable while CLI-side writes to the same directory kept
+# working (NousResearch/hermes-agent#93449).
+#
+# ``_default_pairing_dir()`` below resolves this fresh on every call in
+# production. Tests patch this attribute directly to a concrete path for
+# isolation (e.g. ``patch("gateway.pairing.PAIRING_DIR", tmp_path)``); that
+# continues to work unchanged, since a patched (non-``None``) value takes
+# precedence over recomputing.
+PAIRING_DIR = None
+
+
+def _default_pairing_dir() -> Path:
+    """Resolve the default (non-profile-scoped) pairing directory.
+
+    Recomputed on every call rather than cached at import time -- see the
+    ``PAIRING_DIR`` comment above for why. Honors ``PAIRING_DIR`` when a
+    caller (typically a test) has explicitly set it to a concrete path.
+    """
+    if PAIRING_DIR is not None:
+        return PAIRING_DIR
+    return get_hermes_dir("platforms/pairing", "pairing")
 
 
 # Platform value -> its per-platform allowlist env var. When an operator has
@@ -146,6 +176,33 @@ def _user_ids_match(platform: str, left: str, right: str) -> bool:
     return bool(left_aliases and right_aliases and (left_aliases & right_aliases))
 
 
+def _read_allowlist_env(env_var: str) -> str:
+    """Read a platform allowlist env var through the profile secret scope.
+
+    Under multiplexing the process env may hold ANOTHER profile's allowlist
+    (first-writer-wins YAML→env bridges), so reads must honor the installed
+    scope's verdict — including a scoped miss returning empty rather than
+    borrowing the process value.  Unscoped callers (single-profile CLI /
+    admin endpoints) keep the legacy ``os.getenv`` read.
+
+    The grant mirror below writes through ``hermes_cli.config.save_env_value``
+    / ``remove_env_value``: the file target is the active profile's ``.env``
+    (``get_env_path()`` honors the profile-home override) and, under
+    multiplexing, the in-process publish updates the installed scope mapping
+    rather than the shared ``os.environ`` (#88441).
+    """
+    try:
+        from agent.secret_scope import UnscopedSecretError, get_secret
+
+        try:
+            return (get_secret(env_var) or "").strip()
+        except UnscopedSecretError:
+            pass
+    except Exception:
+        pass
+    return (os.getenv(env_var) or "").strip()
+
+
 def _sync_allowlist_add(platform: str, user_id: str) -> None:
     """Add ``user_id`` to the platform allowlist env var IF one is configured.
 
@@ -158,7 +215,7 @@ def _sync_allowlist_add(platform: str, user_id: str) -> None:
     env_var = _allowlist_env_for_platform(platform)
     if not env_var:
         return
-    current = os.getenv(env_var, "").strip()
+    current = _read_allowlist_env(env_var)
     if not current:
         return  # No allowlist configured — leave the gateway open (option i).
     ids = _split_allowlist(current)
@@ -278,7 +335,7 @@ def _sync_allowlist_remove(platform: str, user_id: str) -> None:
     env_var = _allowlist_env_for_platform(platform)
     if not env_var:
         return
-    current = os.getenv(env_var, "").strip()
+    current = _read_allowlist_env(env_var)
     if not current:
         return  # No allowlist configured — do not touch config-only snapshots.
     ids = _split_allowlist(current)
@@ -345,7 +402,7 @@ def _migrate_split_pairing_dirs(
     home = home or get_hermes_home()
     old_dir = home / "pairing"
     new_dir = home / "platforms" / "pairing"
-    active = active or PAIRING_DIR
+    active = active if active is not None else _default_pairing_dir()
     alternate = new_dir if active.resolve() == old_dir.resolve() else old_dir
     _merge_pairing_dir(active, alternate)
 
@@ -408,7 +465,7 @@ class PairingStore:
                 home=profile_home,
             )
         else:
-            self._dir = PAIRING_DIR
+            self._dir = _default_pairing_dir()
         self._dir.mkdir(parents=True, exist_ok=True)
         if profile:
             # Explicit stores must resolve exactly as a standalone
