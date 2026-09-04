@@ -350,6 +350,28 @@ class TestInFlightDedupe:
         assert result["success"] is True
         assert result["delivery_outcome"] == "suppressed"
 
+    def test_run_claimed_job_reports_exact_unknown_execution_not_stale_success(self):
+        from tools.cronjob_tools import _run_claimed_job
+
+        def probe_run(job, **_kwargs):
+            job["execution_id"] = "exec-unknown"
+            return True
+
+        with patch("cron.scheduler.run_one_job", side_effect=probe_run), \
+             patch("cron.executions.get_execution", return_value={
+                 "id": "exec-unknown",
+                 "status": "unknown",
+                 "error": "worker owner exited",
+             }), \
+             patch("tools.cronjob_tools.get_job", return_value={
+                 "last_status": "ok",
+                 "last_error": None,
+             }):
+            res = _run_claimed_job(_job("job-bg-unknown"))
+
+        assert res["success"] is False
+        assert res["error"] == "worker owner exited"
+
     def test_background_dispatch_reports_running_job_immediately(self):
         """The dispatch path pre-checks the running set so a mid-run job
         reports in the tool response, not as a delayed completion event."""
