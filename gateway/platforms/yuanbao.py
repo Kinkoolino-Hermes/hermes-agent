@@ -4788,33 +4788,34 @@ class MessageSender:
 
     @staticmethod
     def strip_cron_wrapper(
-        content: str, *, include_management_footer: bool
+        content: str,
+        *,
+        task_name: str,
+        job_id: str,
+        include_management_footer: bool,
     ) -> str:
         """Strip a scheduler cron wrapper using its known footer contract."""
-        if not content.startswith("Cronjob Response: "):
+        wrapper_prefix = (
+            f"Cronjob Response: {task_name}\n"
+            f"(job_id: {job_id})\n"
+            "-------------\n\n"
+        )
+        if not content.startswith(wrapper_prefix):
             return content
 
-        divider = "\n-------------\n\n"
-        divider_pos = content.find(divider)
-        if divider_pos < 0:
-            return content
-
-        header = content[:divider_pos]
-        if "\n(job_id: " not in header:
-            return content
-
-        body_start = divider_pos + len(divider)
+        body_start = len(wrapper_prefix)
         body_end = len(content)
         if include_management_footer:
-            legacy_footer = re.search(
-                r'\n\nTo stop or manage this job, send me a new message '
-                r'\(e\.g\. "stop reminder [^\r\n]*"\)\.\Z',
-                content,
+            legacy_footer = (
+                "\n\nTo stop or manage this job, send me a new message "
+                f'(e.g. "stop reminder {task_name}").'
             )
-            if legacy_footer and legacy_footer.start() > body_start:
-                body_end = legacy_footer.start()
+            if content.endswith(legacy_footer):
+                footer_start = len(content) - len(legacy_footer)
+                if footer_start >= body_start:
+                    body_end = footer_start
         body = content[body_start:body_end].strip()
-        return body or content
+        return body
 
     # -- Cleanup on disconnect ---------------------------------------------
 

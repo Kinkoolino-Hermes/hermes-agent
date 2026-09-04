@@ -3272,23 +3272,6 @@ def _deliver_result(
     # instead of it living only in a WARNING log line.
     unverified_targets: list = []
 
-    if wrap_response:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}"
-        )
-        if include_management_footer:
-            delivery_content += (
-                f"\n\n"
-                f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
-            )
-    else:
-        delivery_content = content
-
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
 
@@ -3303,7 +3286,26 @@ def _deliver_result(
 
     apply_media_policy_env(user_cfg)
 
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
+    # MEDIA directives belong to the agent-produced body, not scheduler metadata.
+    # Extract them before wrapping so a task name or job ID containing MEDIA-like
+    # text cannot be rewritten or interpreted as an attachment.
+    media_files, cleaned_content = BasePlatformAdapter.extract_media(content)
+    if wrap_response:
+        task_name = job.get("name", job["id"])
+        job_id = job.get("id", "")
+        cleaned_delivery_content = (
+            f"Cronjob Response: {task_name}\n"
+            f"(job_id: {job_id})\n"
+            f"-------------\n\n"
+            f"{cleaned_content}"
+        )
+        if include_management_footer:
+            cleaned_delivery_content += (
+                f"\n\n"
+                f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+            )
+    else:
+        cleaned_delivery_content = cleaned_content
     requested_media = [(str(p), v) for p, v in media_files]
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     # Attachments the policy filter dropped will never be sent on ANY lane —
@@ -3436,6 +3438,8 @@ def _deliver_result(
 
             target_delivery_content = MessageSender.strip_cron_wrapper(
                 cleaned_delivery_content,
+                task_name=task_name,
+                job_id=job_id,
                 include_management_footer=include_management_footer,
             )
 

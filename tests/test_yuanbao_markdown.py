@@ -160,9 +160,82 @@ class TestStripCronWrapper(unittest.TestCase):
 
         self.assertEqual(
             MessageSender.strip_cron_wrapper(
-                wrapped, include_management_footer=True
+                wrapped,
+                task_name="daily-report",
+                job_id="test-job",
+                include_management_footer=True,
             ),
             "Here is today's summary.",
+        )
+
+    def test_strips_legacy_wrapper_with_multiline_task_name(self):
+        from gateway.platforms.yuanbao import MessageSender
+
+        task_name = "line-one\nline-two"
+        body = "Here is today's summary."
+        wrapped = (
+            f"Cronjob Response: {task_name}\n"
+            "(job_id: test-job)\n"
+            "-------------\n\n"
+            f"{body}\n\n"
+            "To stop or manage this job, send me a new message "
+            f'(e.g. "stop reminder {task_name}").'
+        )
+
+        self.assertEqual(
+            MessageSender.strip_cron_wrapper(
+                wrapped,
+                task_name=task_name,
+                job_id="test-job",
+                include_management_footer=True,
+            ),
+            body,
+        )
+
+    def test_strips_legacy_wrapper_when_task_name_contains_divider(self):
+        from gateway.platforms.yuanbao import MessageSender
+
+        task_name = "line-one\n-------------\n\nline-two"
+        body = "Here is today's summary."
+        wrapped = (
+            f"Cronjob Response: {task_name}\n"
+            "(job_id: test-job)\n"
+            "-------------\n\n"
+            f"{body}\n\n"
+            "To stop or manage this job, send me a new message "
+            f'(e.g. "stop reminder {task_name}").'
+        )
+
+        self.assertEqual(
+            MessageSender.strip_cron_wrapper(
+                wrapped,
+                task_name=task_name,
+                job_id="test-job",
+                include_management_footer=True,
+            ),
+            body,
+        )
+
+    def test_strips_legacy_wrapper_from_media_only_body(self):
+        from gateway.platforms.yuanbao import MessageSender
+
+        wrapped = (
+            "Cronjob Response: media-report\n"
+            "(job_id: test-job)\n"
+            "-------------\n\n"
+            "\n\n"
+            "To stop or manage this job, send me a new message "
+            '(e.g. "stop reminder media-report").'
+        )
+
+        self.assertEqual(
+            MessageSender.strip_cron_wrapper(
+                wrapped,
+                task_name="media-report",
+                job_id="test-job",
+                include_management_footer=True,
+            ),
+            "",
         )
 
     def test_strips_header_only_wrapper_without_footer(self):
@@ -177,7 +250,10 @@ class TestStripCronWrapper(unittest.TestCase):
 
         self.assertEqual(
             MessageSender.strip_cron_wrapper(
-                wrapped, include_management_footer=False
+                wrapped,
+                task_name="daily-report",
+                job_id="test-job",
+                include_management_footer=False,
             ),
             "Here is today's summary.",
         )
@@ -199,7 +275,10 @@ class TestStripCronWrapper(unittest.TestCase):
 
         self.assertEqual(
             MessageSender.strip_cron_wrapper(
-                wrapped, include_management_footer=False
+                wrapped,
+                task_name="daily-report",
+                job_id="test-job",
+                include_management_footer=False,
             ),
             body,
         )
@@ -221,7 +300,10 @@ class TestStripCronWrapper(unittest.TestCase):
 
         self.assertEqual(
             MessageSender.strip_cron_wrapper(
-                wrapped, include_management_footer=False
+                wrapped,
+                task_name="daily-report",
+                job_id="test-job",
+                include_management_footer=False,
             ),
             body,
         )
@@ -243,7 +325,10 @@ class TestStripCronWrapper(unittest.TestCase):
 
         self.assertEqual(
             MessageSender.strip_cron_wrapper(
-                wrapped, include_management_footer=False
+                wrapped,
+                task_name="daily-report",
+                job_id="test-job",
+                include_management_footer=False,
             ),
             body,
         )

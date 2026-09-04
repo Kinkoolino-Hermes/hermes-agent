@@ -448,6 +448,44 @@ class TestDeliverResultWrapping:
         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
         assert sent_content == body
 
+    def test_yuanbao_strips_wrapper_before_media_extraction_from_task_name(self):
+        """Media-like text in a valid task name must not corrupt wrapper removal."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.YUANBAO: pconfig}
+        body = "Daily report."
+
+        with (
+            patch("gateway.config.load_gateway_config", return_value=mock_cfg),
+            patch(
+                "tools.send_message_tool._send_to_platform",
+                new=AsyncMock(return_value={"success": True}),
+            ) as send_mock,
+            patch(
+                "cron.scheduler.load_config",
+                return_value={
+                    "cron": {
+                        "wrap_response": True,
+                        "include_management_footer": True,
+                    }
+                },
+            ),
+        ):
+            job = {
+                "id": "test-job",
+                "name": "report\nMEDIA:/tmp/task-name.png",
+                "deliver": "origin",
+                "origin": {"platform": "yuanbao", "chat_id": "direct:123"},
+            }
+            result = _deliver_result(job, body)
+
+        assert result is None
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content == body
+
     def test_wrap_response_false_overrides_management_footer_opt_in(self):
         from gateway.config import Platform
 
