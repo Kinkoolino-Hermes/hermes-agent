@@ -406,7 +406,7 @@ def test_lost_fire_claim_stops_stale_delivery(monkeypatch):
             "id": execution_id, "fire_identity": fire_identity,
         },
     )
-    monkeypatch.setattr(scheduler, "mark_execution_running", lambda execution_id: None)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda execution_id: {})
     monkeypatch.setattr(scheduler, "finish_execution", lambda *args, **kwargs: None)
     save_output = MagicMock()
     deliver_result = MagicMock()
@@ -592,7 +592,7 @@ def test_terminal_owner_cas_failure_marks_ledger_ownership_lost(monkeypatch):
             "id": execution_id, "fire_identity": fire_identity,
         },
     )
-    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: None)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
     monkeypatch.setattr(
         scheduler,
         "run_job",

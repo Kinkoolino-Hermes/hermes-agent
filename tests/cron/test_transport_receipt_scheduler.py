@@ -258,6 +258,32 @@ def test_persisted_non_delivered_receipts_do_not_satisfy_component_plan():
             ) is False
 
 
+def test_delivered_receipt_to_different_actual_target_does_not_satisfy_plan():
+    from cron.scheduler import _persist_target_text_receipts
+
+    requested_target = TransportTarget("telegram", "123", "topic-7")
+    actual_target = TransportTarget("telegram", "123")
+    attempts = {("telegram", "123", "topic-7", "text", 0): "attempt"}
+    requested = {
+        "platform": "telegram",
+        "chat_id": "123",
+        "thread_id": "topic-7",
+    }
+    receipt = TransportReceipt(
+        outcome="delivered",
+        requested_target=requested_target,
+        actual_target=actual_target,
+        provider_message_id="provider-ack-1",
+        component="text",
+        ordinal=0,
+    )
+
+    with patch("cron.scheduler.record_transport_receipt", return_value=True):
+        assert _persist_target_text_receipts(
+            (receipt,), attempts, requested, components={"text"}
+        ) is False
+
+
 def test_standalone_telegram_caption_preregistration_omits_unsent_text_component():
     from cron.scheduler import _receipt_text_chunks_for_target
     from tools.send_message_tool import _plan_standalone_telegram_text

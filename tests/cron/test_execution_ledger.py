@@ -765,6 +765,101 @@ def test_execution_and_receipt_database_never_persists_payloads_paths_or_raw_err
     assert "RAW_PROVIDER_EXCEPTION_SENTINEL" not in dump
     assert "user@example.org" not in dump
 
+def test_execution_can_be_loaded_by_exact_attempt_id(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    first = executions.create_execution("same-job", source="builtin")
+    second = executions.create_execution("same-job", source="builtin")
+
+    assert executions.get_execution(first["id"]) == first
+    assert executions.get_execution(second["id"]) == second
+    assert executions.get_execution("missing") is None
+
+
+def test_fresh_external_handoff_is_not_recovered_before_worker_adopts(
+    monkeypatch, tmp_path
+):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("handoff-job", source="builtin")
+    assert executions.mark_execution_handoff_pending(record["id"]) is not None
+
+    monkeypatch.setattr(executions, "_PROCESS_ID", "replacement-gateway")
+    monkeypatch.setattr(executions, "_owner_is_live", lambda _pid, _started: False)
+
+    assert executions.recover_interrupted_executions() == 0
+    assert executions.get_execution(record["id"])["status"] == "claimed"
+    adopted = executions.adopt_claimed_execution(record["id"])
+    assert adopted["status"] == "running"
+    assert adopted["handoff_pending"] == 0
+
+
+def test_stale_external_handoff_is_recovered_unknown(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("handoff-job", source="builtin")
+    pending = executions.mark_execution_handoff_pending(record["id"])
+
+    monkeypatch.setattr(executions, "_PROCESS_ID", "replacement-gateway")
+    monkeypatch.setattr(executions, "_owner_is_live", lambda _pid, _started: False)
+    monkeypatch.setattr(
+        executions.time,
+        "time",
+        lambda: pending["handoff_started_at"]
+        + executions.HANDOFF_ADOPTION_GRACE_SECONDS
+        + 1,
+    )
+
+    assert executions.recover_interrupted_executions() == 1
+    recovered = executions.get_execution(record["id"])
+    assert recovered["status"] == "unknown"
+    assert recovered["handoff_pending"] == 0
+
+
+def test_recovery_does_not_overwrite_concurrent_worker_adoption(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("adoption-race", source="builtin")
+    pending = executions.mark_execution_handoff_pending(record["id"])
+    assert pending is not None
+    monkeypatch.setattr(executions, "_PROCESS_ID", "replacement-scheduler")
+    monkeypatch.setattr(
+        executions.time,
+        "time",
+        lambda: pending["handoff_started_at"]
+        + executions.HANDOFF_ADOPTION_GRACE_SECONDS
+        + 1,
+    )
+
+    def adopt_while_liveness_is_checked(_pid, _started_at):
+        monkeypatch.setattr(executions, "_PROCESS_ID", "external-worker")
+        monkeypatch.setattr(executions.os, "getpid", lambda: 4242)
+        monkeypatch.setattr(executions, "_process_start_time", lambda _pid: 9876)
+        assert executions.adopt_claimed_execution(record["id"]) is not None
+        return False
+
+    monkeypatch.setattr(executions, "_owner_is_live", adopt_while_liveness_is_checked)
+
+    assert executions.recover_interrupted_executions() == 0
+    current = executions.get_execution(record["id"])
+    assert current is not None
+    assert current["status"] == "running"
+    assert current["process_id"] == "external-worker"
+    assert current["pid"] == 4242
+
+
+def test_foreign_process_cannot_start_or_finish_execution(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("owner-fence", source="builtin")
+    original_process_id = executions._PROCESS_ID
+    original_pid = record["pid"]
+
+    monkeypatch.setattr(executions, "_PROCESS_ID", "foreign-process")
+    monkeypatch.setattr(executions.os, "getpid", lambda: original_pid + 1)
+    assert executions.mark_execution_running(record["id"]) is None
+    assert executions.finish_execution(record["id"], success=True) is None
+
+    monkeypatch.setattr(executions, "_PROCESS_ID", original_process_id)
+    monkeypatch.setattr(executions.os, "getpid", lambda: original_pid)
+    assert executions.mark_execution_running(record["id"]) is not None
+    assert executions.finish_execution(record["id"], success=True) is not None
+
 
 def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path):
     import cron.executions as executions
@@ -849,6 +944,23 @@ def test_execution_retention_cascades_receipt_rows(monkeypatch, tmp_path):
         ).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM delivery_components").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0] == 0
+
+def test_recently_finished_long_running_execution_survives_retention(
+    monkeypatch, tmp_path
+):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 1)
+    long_running = executions.create_execution("long-running", source="builtin")
+    assert executions.mark_execution_running(long_running["id"]) is not None
+    newer = executions.create_execution("newer", source="builtin")
+    assert executions.finish_execution(newer["id"], success=True) is not None
+
+    finished = executions.finish_execution(long_running["id"], success=True)
+
+    assert finished is not None
+    assert finished["status"] == "completed"
+    assert executions.get_execution(long_running["id"])["status"] == "completed"
+    assert executions.get_execution(newer["id"]) is None
 
 
 def test_corrupt_store_fails_closed_without_overwrite(monkeypatch, tmp_path):
@@ -993,7 +1105,7 @@ def test_run_one_job_records_running_then_terminal(monkeypatch):
     monkeypatch.setattr(
         scheduler,
         "mark_execution_running",
-        lambda execution_id: events.append(("running", execution_id)),
+        lambda execution_id: events.append(("running", execution_id)) or {},
         raising=False,
     )
     monkeypatch.setattr(
@@ -1033,7 +1145,12 @@ def test_direct_run_passes_one_execution_and_fire_identity_to_delivery(monkeypat
         return {"id": "exec-direct", "fire_identity": kwargs.get("fire_identity")}
 
     monkeypatch.setattr(scheduler, "create_execution", create)
-    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_a, **_kw: None)
+    def bind(execution_id, fire_identity):
+        captured["bound"] = (execution_id, fire_identity)
+        return {"id": execution_id, "fire_identity": fire_identity}
+
+    monkeypatch.setattr(scheduler, "bind_execution_fire_identity", bind)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_a, **_kw: {})
     monkeypatch.setattr(scheduler, "finish_execution", lambda *_a, **_kw: None)
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(scheduler, "heartbeat_fire_claim", lambda *_a, **_kw: True)
@@ -1062,11 +1179,13 @@ def test_direct_run_passes_one_execution_and_fire_identity_to_delivery(monkeypat
     }) is True
     expected = scheduled_fire_identity("manual-identity", fire_at)
     assert captured == {
-        "created": ("manual-identity", "direct", expected),
+        "created": ("manual-identity", "direct", None),
+        "bound": ("exec-direct", expected),
         "adapters": None,
         "loop": None,
         "execution_id": "exec-direct",
         "fire_identity": expected,
+        "for_failure": False,
     }
 
 

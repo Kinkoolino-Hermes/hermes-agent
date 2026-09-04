@@ -281,6 +281,36 @@ async def test_send_thread_fallback_receipt_keeps_requested_and_actual_targets()
 
 
 @pytest.mark.asyncio
+async def test_direct_messages_topic_receipt_preserves_logical_topic_target():
+    adapter = _make_adapter()
+    calls = []
+
+    async def mock_send_message(**kwargs):
+        calls.append(dict(kwargs))
+        return SimpleNamespace(message_id=270455)
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+    result = await adapter.send(
+        chat_id="775566675",
+        content="cron direct-messages topic delivery",
+        metadata={
+            "direct_messages_topic_id": "270453",
+            "_transport_receipt_requested_target": {
+                "platform": "telegram",
+                "chat_id": "775566675",
+                "thread_id": "270453",
+            },
+        },
+    )
+
+    assert calls[0]["direct_messages_topic_id"] == 270453
+    assert calls[0].get("message_thread_id") is None
+    assert result.receipt is not None
+    assert result.receipt.requested_target.thread_id == "270453"
+    assert result.receipt.actual_target.thread_id == "270453"
+
+
+@pytest.mark.asyncio
 async def test_multi_chunk_send_emits_every_telegram_ack_in_order():
     adapter = _make_adapter()
     adapter.truncate_message = MagicMock(return_value=["one", "two"])

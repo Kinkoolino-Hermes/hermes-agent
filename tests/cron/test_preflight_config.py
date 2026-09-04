@@ -129,7 +129,7 @@ class TestMissingProviderKeyBlocks:
         job = _job()
         deliveries = []
 
-        def fake_deliver(job, content, adapters=None, loop=None, **_receipt_identity):
+        def fake_deliver(job, content, adapters=None, loop=None, **kwargs):
             deliveries.append(content)
             return None
 
@@ -233,7 +233,7 @@ class TestOptOut:
         job = _job()
         deliveries = []
 
-        def fake_deliver(job, content, adapters=None, loop=None, **_receipt_identity):
+        def fake_deliver(job, content, adapters=None, loop=None, **kwargs):
             deliveries.append(content)
             return None
 

@@ -242,11 +242,18 @@ def cron_list(show_all: bool = False):
 
         last_status = job.get("last_status")
         if last_status:
-            last_run = job.get("last_run_at") or "?"
-            status_display = color(
-                last_status,
-                Colors.GREEN if last_status == "ok" else Colors.RED,
-            )
+            last_run = job.get("last_run_at", "?")
+            if last_status == "ok":
+                status_display = color("ok", Colors.GREEN)
+            elif last_status == "delivery_failed":
+                # Preserve the warning without exposing provider/target detail
+                # from the model-safe summary projection.
+                status_display = color("delivery_failed", Colors.YELLOW)
+            else:
+                status_display = color(f"{last_status}: {job.get('last_error', '?')}", Colors.RED)
+                streak = int(job.get("failure_streak") or 0)
+                if streak >= 2:
+                    status_display += color(f"  ({streak} failures in a row)", Colors.RED)
             print(f"    Last run:  {last_run}  {status_display}")
 
         dispatch_line = _dispatch_display(job.get("last_dispatch"))
@@ -259,6 +266,16 @@ def cron_list(show_all: bool = False):
 
         if job.get("last_delivery_error"):
             print(f"    {color('⚠ Delivery failed', Colors.YELLOW)}")
+
+        # A live adapter acked the last send but returned no message_id /
+        # raw_response (Slack/Matrix/Mattermost shape): accepted as delivered,
+        # but say so here rather than only in a WARNING log line.
+        unverified = job.get("last_delivery_unverified")
+        if unverified:
+            print(
+                f"    {color('⚠ Delivery UNVERIFIED:', Colors.YELLOW)} "
+                "adapter acked without message_id/raw_response"
+            )
 
         fire_err = job.get("last_fire_error")
         if isinstance(fire_err, dict):
@@ -672,13 +689,21 @@ def _cron_doctor_issues_for_job(job: Dict[str, Any]) -> List[str]:
     issues: List[str] = []
 
     last_status = str(job.get("last_status") or "").strip().lower()
-    if last_status and last_status != "ok":
+    # "delivery_failed" means the agent run itself succeeded, so it is not a
+    # failed last run — the dedicated delivery issue below reports it (and
+    # last_error is None, which would render as "unknown error" here).
+    if last_status and last_status not in {"ok", "delivery_failed"}:
         err = str(job.get("last_error") or "unknown error").strip()
         issues.append(f"last run failed: {err}")
 
     delivery_err = str(job.get("last_delivery_error") or "").strip()
     if delivery_err:
         issues.append(f"last delivery failed: {delivery_err}")
+
+    unverified = job.get("last_delivery_unverified")
+    if unverified:
+        targets = ", ".join(str(t) for t in unverified) if isinstance(unverified, list) else str(unverified)
+        issues.append(f"last delivery unverified (adapter acked without evidence): {targets}")
 
     if job.get("enabled", True) and job.get("state") not in {"paused", "completed"}:
         next_run = str(job.get("next_run_at") or "").strip()
@@ -750,6 +775,7 @@ def cron_create(args):
         prompt=args.prompt,
         name=getattr(args, "name", None),
         deliver=getattr(args, "deliver", None),
+        failure_deliver=getattr(args, "failure_deliver", None),
         repeat=getattr(args, "repeat", None),
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
@@ -826,6 +852,7 @@ def cron_edit(args):
         prompt=getattr(args, "prompt", None),
         name=getattr(args, "name", None),
         deliver=getattr(args, "deliver", None),
+        failure_deliver=getattr(args, "failure_deliver", None),
         repeat=getattr(args, "repeat", None),
         skills=final_skills,
         script=getattr(args, "script", None),

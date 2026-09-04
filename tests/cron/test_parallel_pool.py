@@ -201,12 +201,12 @@ class TestRunningJobGuard:
             if job_id == "healthy-job"
             else None,
         )
-        monkeypatch.setattr(sched, "mark_execution_running", lambda *_a, **_kw: None)
         monkeypatch.setattr(
             sched,
             "bind_execution_fire_identity",
             lambda eid, fire: {"id": eid, "fire_identity": fire},
         )
+        monkeypatch.setattr(sched, "mark_execution_running", lambda *_a, **_kw: {})
         monkeypatch.setattr(sched, "heartbeat_fire_claim", lambda *_a, **_kw: True)
 
         n = sched.tick(verbose=False)
