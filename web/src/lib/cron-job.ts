@@ -1,5 +1,22 @@
 import type { CronJob, CronJobMutation } from "./api";
 
+export function cronJobProfile(job: CronJob): string {
+  const profile = typeof job.profile === "string" ? job.profile : "";
+  const profileName =
+    typeof job.profile_name === "string" ? job.profile_name : "";
+  return profile || profileName || "default";
+}
+
+export function cronJobKey(job: CronJob): string {
+  return `${cronJobProfile(job)}:${job.id}`;
+}
+
+export function splitCronJobKey(key: string): { profile: string; id: string } {
+  const idx = key.indexOf(":");
+  if (idx === -1) return { profile: "default", id: key };
+  return { profile: key.slice(0, idx) || "default", id: key.slice(idx + 1) };
+}
+
 export async function loadCronJobDetailForEditor(
   getDetail: (id: string, profile: string) => Promise<CronJob>,
   job: CronJob,
@@ -8,7 +25,8 @@ export async function loadCronJobDetailForEditor(
   if (!profile || profile === "all") {
     throw new Error("cron_detail_profile_required");
   }
-  return getDetail(job.id, profile);
+  const detail = await getDetail(job.id, profile);
+  return { ...detail, profile };
 }
 
 export function cronJobSummaryPresentation(job: CronJob): {

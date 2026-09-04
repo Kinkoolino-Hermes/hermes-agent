@@ -21,10 +21,13 @@ import type {
 import {
   buildCronJobPayload,
   cronJobHasExecutionContent,
+  cronJobKey,
+  cronJobProfile,
   cronJobFormFromJob,
   cronJobSummaryPresentation,
   loadCronJobDetailForEditor,
   cronLastResult,
+  splitCronJobKey,
   type CronJobFormState,
 } from "@/lib/cron-job";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
@@ -478,10 +481,6 @@ function getModelDisplay(job: CronJob): string {
   return cronJobSummaryPresentation(job).modelLabel;
 }
 
-function getJobKey(job: CronJob): string {
-  return job.id;
-}
-
 function profileLabel(profile: string): string {
   return profile === "default" ? "default" : profile;
 }
@@ -576,25 +575,24 @@ export default function CronPage() {
   const [availableToolsets, setAvailableToolsets] = useState<ToolsetInfo[]>([]);
   const [modelOptions, setModelOptions] = useState<ModelOptionsResponse | null>(null);
 
-  const resourceProfile = editJob ? selectedProfile : createProfile;
+  const resourceProfile = editJob ? cronJobProfile(editJob) : createProfile;
 
   const openEditModal = useCallback(async (job: CronJob) => {
+    const profile = cronJobProfile(job);
     try {
       const detail = await loadCronJobDetailForEditor(
         api.getCronJobDetail,
         job,
-        selectedProfile,
+        profile,
       );
       setEditJob(detail);
       setEditForm(editorFormFromJob(detail));
     } catch (error) {
       const message =
-        selectedProfile === "all"
-          ? "Select one profile before editing a cron job"
-          : `${t.common.loading}: ${error}`;
+        `${t.common.loading}: ${error}`;
       showToast(message, "error");
     }
-  }, [selectedProfile, showToast, t.common.loading]);
+  }, [showToast, t.common.loading]);
 
   const selectedProfileRef = useRef(selectedProfile);
   const jobsRequestGenerationRef = useRef(0);
@@ -707,7 +705,7 @@ export default function CronPage() {
   };
 
   const handleEdit = async () => {
-    if (!editJob || selectedProfile === "all") return;
+    if (!editJob) return;
     const payload = buildCronJobPayloadFromEditor(editForm);
     if (
       !payload.schedule ||
@@ -725,7 +723,7 @@ export default function CronPage() {
       await api.updateCronJob(
         editJob.id,
         payload,
-        selectedProfile,
+        cronJobProfile(editJob),
       );
       showToast("Saved changes ✓", "success");
       setEditJob(null);
@@ -738,20 +736,17 @@ export default function CronPage() {
   };
 
   const handlePauseResume = async (job: CronJob) => {
-    if (selectedProfile === "all") {
-      showToast("Select one profile before changing a cron job", "error");
-      return;
-    }
     try {
       const isPaused = getJobState(job) === "paused";
+      const profile = cronJobProfile(job);
       if (isPaused) {
-        await api.resumeCronJob(job.id, selectedProfile);
+        await api.resumeCronJob(job.id, profile);
         showToast(
           `${t.cron.resume}: "${truncateText(getJobTitle(job), 30)}"`,
           "success",
         );
       } else {
-        await api.pauseCronJob(job.id, selectedProfile);
+        await api.pauseCronJob(job.id, profile);
         showToast(
           `${t.cron.pause}: "${truncateText(getJobTitle(job), 30)}"`,
           "success",
@@ -764,11 +759,7 @@ export default function CronPage() {
   };
 
   const handleTrigger = async (job: CronJob) => {
-    if (selectedProfile === "all") {
-      showToast("Select one profile before triggering a cron job", "error");
-      return;
-    }
-    const jobKey = getJobKey(job);
+    const jobKey = cronJobKey(job);
     const label = `${t.cron.triggerNow}: "${truncateText(getJobTitle(job), 30)}"`;
     const viewProfile = selectedProfile;
     const controller = triggerControllerRef.current;
@@ -782,7 +773,7 @@ export default function CronPage() {
       // the request has not produced yet. Terminal feedback only.
       const result = await controller.run(
         jobKey,
-        () => api.triggerCronJob(job.id, selectedProfile),
+        () => api.triggerCronJob(job.id, cronJobProfile(job)),
       );
 
       if (
@@ -805,13 +796,11 @@ export default function CronPage() {
 
   const jobDelete = useConfirmDelete({
     onDelete: useCallback(
-      async (id: string) => {
-        if (selectedProfile === "all") {
-          throw new Error("cron_detail_profile_required");
-        }
-        const job = jobs.find((j) => getJobKey(j) === id);
+      async (key: string) => {
+        const { profile, id } = splitCronJobKey(key);
+        const job = jobs.find((j) => cronJobKey(j) === key);
         try {
-          await api.deleteCronJob(id, selectedProfile);
+          await api.deleteCronJob(id, profile);
           showToast(
             `${t.common.delete}: "${job ? truncateText(getJobTitle(job), 30) : id}"`,
             "success",
@@ -854,7 +843,7 @@ export default function CronPage() {
   }
 
   const pendingJob = jobDelete.pendingId
-    ? jobs.find((j) => getJobKey(j) === jobDelete.pendingId)
+    ? jobs.find((j) => cronJobKey(j) === jobDelete.pendingId)
     : null;
 
   return (
@@ -1084,15 +1073,12 @@ export default function CronPage() {
           const state = getJobState(job);
           const title = getJobTitle(job);
           const deliver = asText(job.delivery_kind);
-          const jobKey = getJobKey(job);
+          const profile = cronJobProfile(job);
+          const jobKey = cronJobKey(job);
           const mode = getJobMode(job);
           const modelDisplay = getModelDisplay(job);
           const skillCount = job.skill_count ?? 0;
           const toolsetCount = job.toolset_count ?? 0;
-          const canManage = selectedProfile !== "all";
-          const toolsets = Array.isArray(job.enabled_toolsets)
-            ? job.enabled_toolsets.filter(Boolean)
-            : [];
           const lastResult = cronLastResult(job);
 
           return (
@@ -1171,7 +1157,6 @@ export default function CronPage() {
                   <Button
                     ghost
                     size="icon"
-                    disabled={!canManage}
                     title={state === "paused" ? t.cron.resume : t.cron.pause}
                     aria-label={
                       state === "paused" ? t.cron.resume : t.cron.pause
@@ -1187,7 +1172,7 @@ export default function CronPage() {
                   <Button
                     ghost
                     size="icon"
-                    disabled={!canManage || triggeringJobKeys.has(jobKey)}
+                    disabled={triggeringJobKeys.has(jobKey)}
                     title={t.cron.triggerNow}
                     aria-label={t.cron.triggerNow}
                     onClick={() => handleTrigger(job)}
@@ -1198,7 +1183,6 @@ export default function CronPage() {
                   <Button
                     ghost
                     size="icon"
-                    disabled={!canManage}
                     title="Edit job"
                     aria-label="Edit job"
                     onClick={() => openEditModal(job)}
@@ -1210,7 +1194,6 @@ export default function CronPage() {
                     ghost
                     destructive
                     size="icon"
-                    disabled={!canManage}
                     title={t.common.delete}
                     aria-label={t.common.delete}
                     onClick={() => jobDelete.requestDelete(jobKey)}

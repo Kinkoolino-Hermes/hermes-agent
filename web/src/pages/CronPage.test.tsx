@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  cronJobKey,
+  cronJobProfile,
   cronJobSummaryPresentation,
   loadCronJobDetailForEditor,
 } from "@/lib/cron-job";
@@ -15,6 +17,28 @@ const summary: CronJob = {
 };
 
 describe("loadCronJobDetailForEditor", () => {
+  it("keeps identical job ids distinct across profiles", () => {
+    expect(cronJobKey({ ...summary, profile: "alpha" })).toBe(
+      "alpha:job-detail-1",
+    );
+    expect(cronJobKey({ ...summary, profile: "beta" })).toBe(
+      "beta:job-detail-1",
+    );
+  });
+
+  it("uses the owning profile from a summary row", () => {
+    expect(
+      cronJobProfile({
+        ...summary,
+        profile: "alpha",
+        profile_name: "legacy-name",
+      }),
+    ).toBe("alpha");
+    expect(cronJobProfile({ ...summary, profile_name: "legacy-name" })).toBe(
+      "legacy-name",
+    );
+  });
+
   it("fails closed when no concrete profile is selected", async () => {
     const getDetail = vi.fn();
 
@@ -34,7 +58,7 @@ describe("loadCronJobDetailForEditor", () => {
 
     await expect(
       loadCronJobDetailForEditor(getDetail, summary, "worker_alpha"),
-    ).resolves.toEqual(detail);
+    ).resolves.toEqual({ ...detail, profile: "worker_alpha" });
     expect(getDetail).toHaveBeenCalledOnce();
     expect(getDetail).toHaveBeenCalledWith("job-detail-1", "worker_alpha");
   });
