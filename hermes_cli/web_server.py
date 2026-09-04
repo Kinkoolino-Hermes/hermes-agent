@@ -13460,6 +13460,19 @@ def _public_cron_job(job: Any) -> Dict[str, Any]:
     return public
 
 
+def _public_cron_job_for_profile(job: Any, profile: str) -> Dict[str, Any]:
+    """Add only the validated route identity to a bounded job summary."""
+    from hermes_cli import profiles as profiles_mod
+
+    profile_name = profiles_mod.normalize_profile_name(profile)
+    profiles_mod.validate_profile_name(profile_name)
+    public = _public_cron_job(job)
+    public["profile"] = profile_name
+    public["profile_name"] = profile_name
+    public["is_default_profile"] = profile_name == "default"
+    return public
+
+
 def _public_cron_detail_prompt(value: Any, *, limit: int) -> Optional[str]:
     if type(value) is not str or not value or len(value) > limit:
         return None
@@ -13496,7 +13509,7 @@ def _list_cron_jobs_sync(profile: str = "all"):
     requested = (profile or "all").strip()
     if requested.lower() != "all":
         return [
-            _public_cron_job(job)
+            _public_cron_job_for_profile(job, requested)
             for job in _call_cron_for_profile(requested, "list_jobs", True)
         ]
 
@@ -13506,10 +13519,13 @@ def _list_cron_jobs_sync(profile: str = "all"):
         if not name:
             continue
         try:
-            jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
+            jobs.extend(
+                _public_cron_job_for_profile(job, name)
+                for job in _call_cron_for_profile(name, "list_jobs", True)
+            )
         except Exception:
             _log.exception("Failed to list cron jobs for profile %s", name)
-    return [_public_cron_job(job) for job in jobs]
+    return jobs
 
 
 async def _run_cron_dashboard_io(func, *args, **kwargs):
@@ -13563,7 +13579,7 @@ def _get_cron_job_sync(job_id: str, profile: Optional[str] = None):
     job = _call_cron_for_profile(selected, "get_job", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return _public_cron_job(job)
+    return _public_cron_job_for_profile(job, selected)
 
 
 def _get_cron_job_detail_sync(job_id: str, profile: str):

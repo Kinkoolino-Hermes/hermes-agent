@@ -490,6 +490,26 @@ def test_cron_mutations_require_concrete_profile(monkeypatch):
     assert calls == []
 
 
+def test_public_cron_profile_metadata_is_canonical_and_route_derived():
+    from hermes_cli import web_server
+
+    public = web_server._public_cron_job_for_profile(
+        {
+            "id": "same-id",
+            "profile": "poisoned-profile",
+            "profile_name": "Poisoned Profile",
+            "hermes_home": "/private/home",
+        },
+        "Worker_Alpha",
+    )
+
+    assert public["profile"] == "worker_alpha"
+    assert public["profile_name"] == "worker_alpha"
+    assert public["is_default_profile"] is False
+    assert "hermes_home" not in public
+    assert "poisoned" not in json.dumps(public, sort_keys=True).lower()
+
+
 def test_dashboard_cron_summary_and_detail_have_separate_trust_boundaries(monkeypatch):
     from hermes_cli import web_server
 
@@ -544,13 +564,16 @@ def test_dashboard_cron_summary_and_detail_have_separate_trust_boundaries(monkey
     fetched = web_server._get_cron_job_sync("redacted-job", profile="default")
     sensitive_summary_fields = {
         "prompt", "script", "workdir", "model", "provider", "base_url",
-        "provider_snapshot", "model_snapshot", "profile", "profile_name",
+        "provider_snapshot", "model_snapshot",
         "skills", "context_from", "enabled_toolsets", "deliver", "no_agent",
         "monitor_url",
     }
     for public in (listed, fetched):
         serialized = json.dumps(public, sort_keys=True)
         assert public["name"] == "bounded summary name"
+        assert public["profile"] == "default"
+        assert public["profile_name"] == "default"
+        assert public["is_default_profile"] is True
         assert public["delivery_kind"] == "external"
         assert public["mode"] == "monitor"
         assert public["skill_count"] == 1
@@ -565,6 +588,8 @@ def test_dashboard_cron_summary_and_detail_have_separate_trust_boundaries(monkey
         }
         assert "RAW_" not in serialized
         assert "PRIVATE_" not in serialized
+        assert "worker-private" not in serialized
+        assert "Worker Private" not in serialized
         assert "user@example.org" not in serialized
         assert "/private/" not in serialized
 
@@ -1441,7 +1466,11 @@ async def test_cron_profile_scan_runs_off_event_loop(isolated_profiles, monkeypa
         worker_job["id"], profile="worker_alpha",
     )
 
-    assert any(job["id"] == worker_job["id"] for job in jobs)
+    listed_worker = next(job for job in jobs if job["id"] == worker_job["id"])
+    assert listed_worker["profile"] == "worker_alpha"
+    assert listed_worker["profile_name"] == "worker_alpha"
+    assert listed_worker["is_default_profile"] is False
+    assert "hermes_home" not in listed_worker
     assert "profile" not in paused
     profile_scan_thread_ids = _drain_queue(profile_scan_threads)
     worker_thread_ids = _drain_queue(worker_threads)
