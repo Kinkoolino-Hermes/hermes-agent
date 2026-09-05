@@ -23,6 +23,8 @@ from hermes_constants import get_hermes_home
 _DETAIL_EMOJI = "🧾"
 _DETAIL_TTL_SECONDS = 7 * 24 * 60 * 60
 _MAX_DETAIL_CHARS = 3500
+_MAX_ARTIFACT_SCAN_CHARS = 1024 * 1024
+_READ_CHUNK_CHARS = 8192
 _REGISTRY_LOCK_TIMEOUT_SECONDS = 10.0
 _REGISTRY_LOCK_POLL_SECONDS = 0.01
 _KEYCAPS = (
@@ -212,17 +214,28 @@ def register_digest_delivery(
     source_job_ids: Iterable[str],
     output_file: str | Path | None = None,
     source_names: dict[str, str] | None = None,
+    source_output_paths: dict[str, str] | None = None,
     now: float | None = None,
 ) -> None:
     """Persist metadata for a Matrix digest message that can answer 🧾 details."""
     room_id = str(room_id or "").strip()
     event_id = str(event_id or "").strip()
     sources = normalize_context_from(list(source_job_ids or []))
+    digest_job_id = str(digest_job.get("id") or "").strip()
+    sources = normalize_context_from(
+        [
+            digest_job_id if source.lower() == "self" else source
+            for source in sources
+        ]
+    )
+    if source_output_paths is not None:
+        sources = [job_id for job_id in sources if job_id in source_output_paths]
     if not room_id or not event_id or not sources:
         return
 
     now_ts = float(time.time() if now is None else now)
     names = source_names or {}
+    pinned_paths = source_output_paths or {}
     record = {
         "room_id": room_id,
         "event_id": event_id,
@@ -235,7 +248,11 @@ def register_digest_delivery(
             {
                 "job_id": job_id,
                 "name": str(names.get(job_id) or job_id),
-                "output_path": _latest_output_path(job_id),
+                "output_path": (
+                    _safe_output_path(pinned_paths[job_id])
+                    if job_id in pinned_paths
+                    else _latest_output_path(job_id)
+                ),
             }
             for job_id in sources[: len(_KEYCAPS)]
         ],
@@ -290,10 +307,12 @@ def selection_index_for_reaction(key: str) -> int | None:
 
 def _extract_response_section(text: str) -> str:
     marker = "\n## Response"
-    idx = text.find(marker)
-    if idx == -1 and text.startswith("## Response"):
+    idx = text.rfind(marker)
+    if idx != -1:
+        idx += 1
+    elif text.startswith("## Response"):
         idx = 0
-    if idx == -1:
+    else:
         # Saved cron artifacts can also contain prompts, script output, and
         # error diagnostics. Never fall back to returning the whole artifact
         # when the user-facing response section is absent.
@@ -308,6 +327,55 @@ def _extract_response_section(text: str) -> str:
         if stop_idx != -1:
             body = body[:stop_idx]
     return body.strip()
+
+
+def _read_response_section_bounded(handle) -> str:
+    """Stream the last saved response section without reading the whole artifact."""
+    found = False
+    collecting = False
+    at_line_start = True
+    body_parts: list[str] = []
+    body_chars = 0
+    scanned_chars = 0
+
+    while True:
+        remaining_scan = _MAX_ARTIFACT_SCAN_CHARS - scanned_chars
+        if remaining_scan <= 0:
+            break
+        piece = handle.readline(min(_READ_CHUNK_CHARS, remaining_scan))
+        if not piece:
+            break
+        scanned_chars += len(piece)
+        piece_starts_line = at_line_start
+        at_line_start = piece.endswith("\n")
+        section_line = piece.rstrip("\r\n") if piece_starts_line else ""
+
+        if section_line == "## Response":
+            # The prompt is untrusted and can itself contain section-looking
+            # headings. The scheduler appends the real response last, so each
+            # later response marker supersedes any earlier candidate.
+            found = True
+            collecting = True
+            body_parts = []
+            body_chars = 0
+            continue
+        if collecting and section_line in {"## Error", "## Script Output", "## Prompt"}:
+            collecting = False
+            continue
+        if not collecting:
+            continue
+
+        remaining = _MAX_DETAIL_CHARS + 1 - body_chars
+        if remaining <= 0:
+            # Keep scanning for a later real response marker, but retain only
+            # the bounded prefix of this candidate.
+            continue
+        bounded_piece = piece[:remaining]
+        body_parts.append(bounded_piece)
+        body_chars += len(bounded_piece)
+
+    body = "".join(body_parts).strip()
+    return f"## Response\n{body}" if found and body else ""
 
 
 def _read_safe_output_text(path: str | Path | None) -> str | None:
@@ -349,7 +417,7 @@ def _read_safe_output_text(path: str | Path | None) -> str | None:
 
         with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
             fd = -1
-            return handle.read()
+            return _read_response_section_bounded(handle)
     except OSError:
         return None
     finally:
@@ -359,9 +427,6 @@ def _read_safe_output_text(path: str | Path | None) -> str | None:
 
 def _read_source_detail(source: dict[str, Any]) -> str | None:
     text = _read_safe_output_text(source.get("output_path"))
-    if text is None:
-        fallback = _latest_output_path(str(source.get("job_id") or ""))
-        text = _read_safe_output_text(fallback)
     if text is None:
         return None
     detail = _extract_response_section(text)
@@ -388,7 +453,9 @@ def format_digest_detail_response(
 
 
 def format_digest_source_selection(record: dict[str, Any]) -> str:
-    sources = record.get("sources") if isinstance(record, dict) else []
+    sources = record.get("sources")
+    if not isinstance(sources, list):
+        sources = []
     lines = ["**🧾 Mehrere Einzelberichte verfügbar**", "", "Wähle per Reaction:"]
     for emoji, source in zip(selection_reactions(len(sources)), sources):
         lines.append(

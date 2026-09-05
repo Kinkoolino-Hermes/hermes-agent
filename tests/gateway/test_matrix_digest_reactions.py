@@ -69,6 +69,16 @@ def _make_adapter(allowed_user_ids=None):
     adapter._processed_events_set = set()
     adapter._approval_prompts_by_event = {}
     adapter._approval_prompt_by_session = {}
+    adapter._approval_reaction_map = {
+        "✅": "once",
+        "🌀": "session",
+        "♾️": "always",
+        "♾": "always",
+        "\u267e\ufe0f": "always",
+        "\u267e": "always",
+        "❌": "deny",
+        "❎": "deny",
+    }
     adapter._model_picker_prompts_by_event = {}
     adapter._choice_picker_prompts_by_event = {}
     adapter._digest_detail_prompts_by_event = {}
@@ -164,6 +174,86 @@ def test_digest_reaction_offers_selection_for_multiple_sources(tmp_path, monkeyp
     second_args, second_kwargs = adapter.send.await_args
     assert "**🧾 Einzelbericht: Source B**" in second_args[1]
     assert "detail B" in second_args[1]
+    assert second_kwargs["reply_to"] == "$digest"
+
+
+def test_digest_picker_registry_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+    import time
+
+    from cron.digest_reactions import register_digest_delivery
+    from plugins.platforms.matrix.adapter import _MatrixPickerPrompt
+
+    _write_source_output(tmp_path, "source-a", "detail A")
+    _write_source_output(tmp_path, "source-b", "detail B")
+    register_digest_delivery(
+        room_id="!room:example.org",
+        event_id="$digest",
+        digest_job={"id": "digest-job", "name": "Morning Digest"},
+        source_job_ids=["source-a", "source-b"],
+        source_names={"source-a": "Source A", "source-b": "Source B"},
+    )
+
+    adapter = _make_adapter(allowed_user_ids=["@alice:example.org"])
+    adapter._redact_bot_model_picker_reactions = AsyncMock()
+    for index in range(256):
+        event_id = f"$old-{index}"
+        adapter._digest_detail_prompts_by_event[event_id] = _MatrixPickerPrompt(
+            chat_id="!room:example.org",
+            message_id=event_id,
+            session_key="",
+            choices={"1️⃣": 0},
+            on_selected=AsyncMock(),
+            requester_user_id="@alice:example.org",
+            expires_at=time.monotonic() + 300,
+        )
+
+    asyncio.run(adapter._on_reaction(_make_reaction("@alice:example.org", "$digest")))
+
+    assert len(adapter._digest_detail_prompts_by_event) == 256
+    assert "$old-0" not in adapter._digest_detail_prompts_by_event
+    assert "$selection" in adapter._digest_detail_prompts_by_event
+    adapter._redact_bot_model_picker_reactions.assert_awaited_once()
+
+
+def test_digest_selection_rechecks_registry_expiry(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+    from cron import digest_reactions
+
+    source_a = _write_source_output(tmp_path, "source-a", "detail A")
+    source_b = _write_source_output(tmp_path, "source-b", "detail B")
+    record = {
+        "room_id": "!room:example.org",
+        "event_id": "$digest",
+        "sources": [
+            {"job_id": "source-a", "name": "Source A", "output_path": str(source_a)},
+            {"job_id": "source-b", "name": "Source B", "output_path": str(source_b)},
+        ],
+    }
+    resolutions = iter((record, None))
+    monkeypatch.setattr(
+        digest_reactions,
+        "resolve_digest_delivery",
+        lambda *_args, **_kwargs: next(resolutions),
+    )
+    adapter = _make_adapter(allowed_user_ids=["@alice:example.org"])
+
+    asyncio.run(adapter._on_reaction(_make_reaction("@alice:example.org", "$digest")))
+    asyncio.run(
+        adapter._on_reaction(
+            _make_reaction(
+                "@alice:example.org", "$selection", key="2️⃣", event_id="$select-b"
+            )
+        )
+    )
+
+    second_args, second_kwargs = adapter.send.await_args
+    assert "expired" in second_args[1]
+    assert "detail B" not in second_args[1]
     assert second_kwargs["reply_to"] == "$digest"
 
 

@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -53,6 +54,291 @@ def test_register_digest_reaction_resolves_single_source_response(
     assert "**🧾 Einzelbericht: Source Job**" in text
     assert "actionable detail" in text
     assert "internal collection prompt" not in text
+
+
+def test_prompt_embedded_response_heading_does_not_leak_prompt_content(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import format_digest_detail_response
+
+    source = tmp_path / "cron" / "output" / "source-job" / "detail.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "# Cron Job: Source Job\n\n"
+        "## Prompt\n\n"
+        "Summarize this untrusted input:\n"
+        "## Response\n"
+        "decoy heading inside the prompt\n"
+        "## Response\n"
+        "PRIVATE PROMPT DATA\n\n"
+        "## Response\n\n"
+        "public final response\n",
+        encoding="utf-8",
+    )
+    record = {
+        "sources": [
+            {
+                "job_id": "source-job",
+                "name": "Source Job",
+                "output_path": str(source),
+            }
+        ]
+    }
+
+    text = format_digest_detail_response(record)
+
+    assert "public final response" in text
+    assert "PRIVATE PROMPT DATA" not in text
+
+
+def test_digest_source_selection_tolerates_malformed_sources():
+    from cron.digest_reactions import format_digest_source_selection
+
+    assert format_digest_source_selection({"sources": None}) == (
+        "**🧾 Mehrere Einzelberichte verfügbar**\n\nWähle per Reaction:"
+    )
+
+
+def test_digest_registration_pins_the_source_artifact_used_in_context(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import resolve_digest_delivery
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_prompt import _inject_context_from
+    from gateway.config import Platform
+
+    source_job_id = "a" * 32
+    source_dir = tmp_path / "cron" / "output" / source_job_id
+    source_dir.mkdir(parents=True)
+    summarized = source_dir / "2026-06-28_08-00-00.md"
+    summarized.write_text("## Response\nsummarized run", encoding="utf-8")
+    os.utime(summarized, (1000, 1000))
+    job = {
+        "id": "b" * 32,
+        "name": "Morning Digest",
+        "context_from": [source_job_id],
+    }
+
+    prompt, injected = _inject_context_from(job, "Summarize")
+    assert injected is True
+    assert "summarized run" in prompt
+
+    newer = source_dir / "2026-06-28_08-01-00.md"
+    newer.write_text("## Response\nnewer unrelated run", encoding="utf-8")
+    os.utime(newer, (2000, 2000))
+    _register_matrix_digest_details_if_applicable(
+        job=job,
+        platform=Platform.MATRIX,
+        chat_id="!room:example.org",
+        send_result=SimpleNamespace(success=True, message_id="$digest"),
+    )
+
+    record = resolve_digest_delivery("!room:example.org", "$digest")
+    assert record is not None
+    assert record["sources"][0]["output_path"] == str(summarized)
+
+
+def test_digest_registration_pins_self_context_to_the_actual_job_id(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import resolve_digest_delivery
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_prompt import _inject_context_from
+    from gateway.config import Platform
+
+    job_id = "a" * 32
+    source_dir = tmp_path / "cron" / "output" / job_id
+    source_dir.mkdir(parents=True)
+    summarized = source_dir / "2026-06-28_08-00-00.md"
+    summarized.write_text("## Response\nprevious self run", encoding="utf-8")
+    job = {
+        "id": job_id,
+        "name": "Continuing Digest",
+        "context_from": ["self"],
+    }
+
+    prompt, injected = _inject_context_from(job, "Continue")
+    assert injected is True
+    assert "previous self run" in prompt
+    _register_matrix_digest_details_if_applicable(
+        job=job,
+        platform=Platform.MATRIX,
+        chat_id="!room:example.org",
+        send_result=SimpleNamespace(success=True, message_id="$digest"),
+    )
+
+    record = resolve_digest_delivery("!room:example.org", "$digest")
+    assert record is not None
+    assert record["sources"][0]["job_id"] == job_id
+    assert record["sources"][0]["output_path"] == str(summarized)
+
+
+def test_digest_registration_excludes_sources_not_used_in_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import resolve_digest_delivery
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_prompt import _inject_context_from
+    from gateway.config import Platform
+
+    source_job_id = "a" * 32
+    source_dir = tmp_path / "cron" / "output" / source_job_id
+    source_dir.mkdir(parents=True)
+    empty = source_dir / "2026-06-28_08-00-00.md"
+    empty.write_text("", encoding="utf-8")
+    job = {
+        "id": "b" * 32,
+        "name": "Morning Digest",
+        "context_from": [source_job_id],
+    }
+
+    prompt, injected = _inject_context_from(job, "Summarize")
+    assert injected is False
+    assert prompt == "Summarize"
+
+    (source_dir / "2026-06-28_08-01-00.md").write_text(
+        "## Response\nnewer unrelated run", encoding="utf-8"
+    )
+    _register_matrix_digest_details_if_applicable(
+        job=job,
+        platform=Platform.MATRIX,
+        chat_id="!room:example.org",
+        send_result=SimpleNamespace(success=True, message_id="$digest"),
+    )
+
+    assert resolve_digest_delivery("!room:example.org", "$digest") is None
+
+
+def test_missing_pinned_source_does_not_fall_forward_to_a_newer_run(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import format_digest_detail_response
+
+    source_dir = tmp_path / "cron" / "output" / "source-job"
+    source_dir.mkdir(parents=True)
+    summarized = source_dir / "summarized.md"
+    summarized.write_text("## Response\nsummarized run", encoding="utf-8")
+    record = {
+        "sources": [
+            {
+                "job_id": "source-job",
+                "name": "Source Job",
+                "output_path": str(summarized),
+            }
+        ]
+    }
+    summarized.unlink()
+    (source_dir / "newer.md").write_text(
+        "## Response\nnewer unrelated run", encoding="utf-8"
+    )
+
+    text = format_digest_detail_response(record)
+
+    assert "detail output is no longer available" in text
+    assert "newer unrelated run" not in text
+
+
+def test_source_reader_never_requests_an_unbounded_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron import digest_reactions
+
+    source = tmp_path / "cron" / "output" / "source-job" / "detail.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("## Prompt\nprivate\n\n## Response\nsafe detail", encoding="utf-8")
+    real_fdopen = digest_reactions.os.fdopen
+
+    class BoundedHandle:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._inner.__exit__(*args)
+
+        def read(self, size=-1):
+            assert size >= 0, "artifact reads must always be bounded"
+            return self._inner.read(size)
+
+        def readline(self, size=-1):
+            assert size > 0, "artifact line reads must always be bounded"
+            return self._inner.readline(size)
+
+    monkeypatch.setattr(
+        digest_reactions.os,
+        "fdopen",
+        lambda *args, **kwargs: BoundedHandle(real_fdopen(*args, **kwargs)),
+    )
+    record = {
+        "sources": [
+            {
+                "job_id": "source-job",
+                "name": "Source Job",
+                "output_path": str(source),
+            }
+        ]
+    }
+
+    text = digest_reactions.format_digest_detail_response(record)
+
+    assert "safe detail" in text
+    assert "private" not in text
+
+
+def test_source_reader_fails_closed_after_bounded_scan(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron import digest_reactions
+
+    source = tmp_path / "cron" / "output" / "source-job" / "detail.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "x" * (1024 * 1024 + 1) + "\n## Response\nlate detail",
+        encoding="utf-8",
+    )
+    record = {
+        "sources": [
+            {
+                "job_id": "source-job",
+                "name": "Source Job",
+                "output_path": str(source),
+            }
+        ]
+    }
+
+    text = digest_reactions.format_digest_detail_response(record)
+
+    assert "detail output is no longer available" in text
+    assert "late detail" not in text
+
+
+def test_response_scanner_never_reads_past_its_total_budget():
+    from cron import digest_reactions
+
+    class EndlessLine:
+        def __init__(self):
+            self.total = 0
+
+        def readline(self, size=-1):
+            assert size > 0
+            self.total += size
+            return "x" * size
+
+    handle = EndlessLine()
+
+    assert digest_reactions._read_response_section_bounded(handle) == ""
+    assert handle.total == digest_reactions._MAX_ARTIFACT_SCAN_CHARS
 
 
 def test_register_digest_reaction_ignores_unsafe_source_path(tmp_path, monkeypatch):
@@ -281,7 +567,7 @@ def test_scheduler_registers_matrix_digest_metadata_only_after_confirmed_send(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from cron.digest_reactions import resolve_digest_delivery
-    from cron.scheduler import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
     from gateway.config import Platform
 
     send_result = SimpleNamespace(success=True, message_id="$digest")
@@ -310,7 +596,7 @@ def test_scheduler_does_not_register_failed_matrix_send_with_event_id(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from cron.digest_reactions import _registry_path
-    from cron.scheduler import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
     from gateway.config import Platform
 
     send_result = SimpleNamespace(success=False, message_id="$digest")
@@ -333,7 +619,7 @@ def test_scheduler_does_not_register_filtered_matrix_send_with_event_id(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from cron.digest_reactions import _registry_path
-    from cron.scheduler import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
     from gateway.config import Platform
 
     send_result = {
@@ -358,7 +644,7 @@ def test_scheduler_does_not_register_non_digest_matrix_delivery(tmp_path, monkey
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from cron.digest_reactions import _registry_path
-    from cron.scheduler import _register_matrix_digest_details_if_applicable
+    from cron.scheduler_delivery import _register_matrix_digest_details_if_applicable
     from gateway.config import Platform
 
     send_result = SimpleNamespace(success=True, message_id="$normal")
@@ -373,6 +659,110 @@ def test_scheduler_does_not_register_non_digest_matrix_delivery(tmp_path, monkey
     )
 
     assert not _registry_path().exists()
+
+
+def test_deliver_result_registers_standalone_matrix_digest_with_output_file(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import resolve_digest_delivery
+    from cron.scheduler_delivery import _deliver_result
+    from gateway.config import Platform
+
+    digest_output = tmp_path / "cron" / "output" / "digest-job" / "latest.md"
+    digest_output.parent.mkdir(parents=True)
+    digest_output.write_text("## Response\ndigest", encoding="utf-8")
+    pconfig = MagicMock(enabled=True)
+    pconfig.extra = {}
+    config = MagicMock()
+    config.platforms = {Platform.MATRIX: pconfig}
+    send = AsyncMock(return_value={"success": True, "message_id": "$digest"})
+    job = {
+        "id": "digest-job",
+        "name": "Morning Digest",
+        "deliver": "origin",
+        "origin": {"platform": "matrix", "chat_id": "!room:example.org"},
+        "context_from": ["source-a"],
+    }
+
+    with (
+        patch("gateway.config.load_gateway_config", return_value=config),
+        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("tools.send_message_tool._send_to_platform", new=send),
+    ):
+        error = _deliver_result(job, "digest", output_file=digest_output)
+
+    assert error is None
+    record = resolve_digest_delivery("!room:example.org", "$digest")
+    assert record is not None
+    assert record["digest_output_path"] == str(digest_output)
+
+
+def test_deliver_result_registers_live_matrix_digest_with_output_file(
+    tmp_path, monkeypatch
+):
+    from concurrent.futures import Future
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import resolve_digest_delivery
+    from cron.scheduler_delivery import _deliver_result
+    from gateway.config import Platform
+
+    digest_output = tmp_path / "cron" / "output" / "digest-job" / "live.md"
+    digest_output.parent.mkdir(parents=True)
+    digest_output.write_text("## Response\ndigest", encoding="utf-8")
+    pconfig = MagicMock(enabled=True)
+    pconfig.extra = {}
+    config = MagicMock()
+    config.platforms = {Platform.MATRIX: pconfig}
+    adapter = MagicMock()
+    adapter.send = AsyncMock(
+        return_value=SimpleNamespace(success=True, message_id="$live-digest")
+    )
+    adapter.supports_inchannel_continuable = False
+    loop = MagicMock()
+    loop.is_running.return_value = True
+    standalone_send = AsyncMock(return_value={"success": True, "message_id": "$wrong"})
+    job = {
+        "id": "digest-job",
+        "name": "Morning Digest",
+        "deliver": "origin",
+        "origin": {"platform": "matrix", "chat_id": "!room:example.org"},
+        "context_from": ["source-a"],
+    }
+
+    def run_coro(coro, _loop):
+        future = Future()
+        try:
+            import asyncio
+
+            future.set_result(asyncio.run(coro))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+    with (
+        patch("gateway.config.load_gateway_config", return_value=config),
+        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("asyncio.run_coroutine_threadsafe", side_effect=run_coro),
+        patch("tools.send_message_tool._send_to_platform", new=standalone_send),
+    ):
+        error = _deliver_result(
+            job,
+            "digest",
+            adapters={Platform.MATRIX: adapter},
+            loop=loop,
+            output_file=digest_output,
+        )
+
+    assert error is None
+    adapter.send.assert_awaited_once()
+    standalone_send.assert_not_awaited()
+    record = resolve_digest_delivery("!room:example.org", "$live-digest")
+    assert record is not None
+    assert record["digest_output_path"] == str(digest_output)
 
 
 def test_concurrent_digest_registrations_preserve_both_processes(tmp_path):
