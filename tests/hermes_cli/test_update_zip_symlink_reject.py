@@ -14,6 +14,7 @@ import zipfile
 from unittest.mock import patch
 
 import pytest
+from hermes_cli import update_cmd
 
 
 def _build_zip_with_symlink_member(zip_path: str, link_name: str, target: str) -> None:
@@ -41,7 +42,13 @@ def test_update_via_zip_rejects_symlink_member(tmp_path, monkeypatch):
         target="/etc/passwd",
     )
 
-    from hermes_cli.main import _update_via_zip
+    fake_root = tmp_path / "install_dir"
+    fake_root.mkdir()
+
+    from hermes_cli import main as hermes_main
+    from hermes_cli.update_cmd import _update_via_zip
+
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", fake_root)
 
     args = type("Args", (), {})()
 
@@ -111,13 +118,17 @@ def test_update_via_zip_accepts_normal_member(tmp_path, monkeypatch, capsys):
 
     frontend_events = []
 
-    # Stub the post-extract pip/uv reinstall so we don't actually run pip.
-    # The function may sys.exit(1) when those commands fail; that's fine —
-    # we only care that ZIP validation + extraction completed without
-    # raising "symlink member".
+    # Keep real ZIP validation/extraction, but isolate dependency installation
+    # and import validation: this fixture contains only a README, not Hermes.
+    # Reaching the frontend phases is required; an early exit must fail.
     with patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve), \
          patch("subprocess.run") as fake_run, \
          patch("subprocess.check_call"), \
+         patch("hermes_cli.update_cmd_zip._reinstall_python_deps_after_zip"), \
+         patch(
+             "hermes_cli.update_cmd._validate_critical_modules_import",
+             return_value=(True, None, None),
+         ), \
          patch(
              "hermes_cli.update_cmd._update_node_dependencies",
              side_effect=lambda: frontend_events.append("node") or [],
@@ -133,10 +144,7 @@ def test_update_via_zip_accepts_normal_member(tmp_path, monkeypatch, capsys):
              side_effect=lambda _path: frontend_events.append("web") or True,
          ):
         fake_run.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-        try:
-            hermes_main._update_via_zip(args)
-        except SystemExit:
-            pass
+        update_cmd._update_via_zip(args)
 
     captured = capsys.readouterr()
     assert "symlink member" not in captured.out
