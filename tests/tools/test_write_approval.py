@@ -1844,7 +1844,9 @@ def test_background_review_approved_replay_preserves_staged_read_proof(
     origin_token = set_current_write_origin(BACKGROUND_REVIEW)
     try:
         target = note if action == "write_file" else skill_md
-        sm.mark_background_review_skill_read(target)
+        from tools.skill_manager_guards import mark_background_review_skill_read
+
+        mark_background_review_skill_read(target)
         if action == "edit":
             staged_raw = sm.skill_manage(
                 action="edit",
@@ -1974,7 +1976,9 @@ def test_background_review_changed_after_read_is_not_staged(hermes_home, monkeyp
 
     origin_token = set_current_write_origin(BACKGROUND_REVIEW)
     try:
-        sm.mark_background_review_skill_read(skill_md)
+        from tools.skill_manager_guards import mark_background_review_skill_read
+
+        mark_background_review_skill_read(skill_md)
         skill_md.write_text(
             _SKILL.replace("# Test", "# Changed after read"),
             encoding="utf-8",
