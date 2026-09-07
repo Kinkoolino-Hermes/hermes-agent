@@ -58,9 +58,11 @@ except ImportError:
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome,
+    gateway_trust_env, BasePlatformAdapter,
     SendResult, TransportReceipt, TransportTarget, normalize_transport_provider_message_id,
-    resolve_proxy_url, proxy_kwargs_for_aiohttp, _ssrf_redirect_guard)
+    resolve_proxy_url, proxy_kwargs_for_aiohttp, _ssrf_redirect_guard,
+)
+from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.platforms.helpers import ThreadParticipationTracker
 
 logger = logging.getLogger(__name__)
