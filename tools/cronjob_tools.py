@@ -263,7 +263,7 @@ def _run_heartbeat(job_name: str):
 def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) -> Dict[str, Any]:
     """Fire an already-claimed job through the shared ``run_one_job`` body (split from
     ``_execute_job_now`` so the background path can claim synchronously and hand the run
-    to a worker). Returns the scheduler's typed ``delivery_outcome`` when terminal
+    to a worker). Returns the scheduler's typed ``delivery_outcome`` and effective target when terminal
     bookkeeping reported one; the completion renderer fails closed when it is absent."""
     job_id = job["id"]
     _registered = False
@@ -331,6 +331,7 @@ def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) ->
             "success": bool(processed and ok),
             "error": run_error,
             "delivery_outcome": delivery_result.get("delivery_outcome"),
+            "delivery_target": delivery_result.get("delivery_target"),
         }
     except Exception as e:
         logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
@@ -347,6 +348,7 @@ def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) ->
             "success": False,
             "error": str(e),
             "delivery_outcome": delivery_result.get("delivery_outcome"),
+            "delivery_target": delivery_result.get("delivery_target"),
         }
 
 
@@ -435,7 +437,7 @@ def _manual_run_completion(
         f"Cron job '{job_name}' ({job_id}) finished its manual run.",
         f"Result: {'ok' if res.get('success') else 'FAILED'}"
         + (f" — {res.get('error')}" if res.get("error") else ""),
-        _manual_run_delivery_line(deliver, res.get("delivery_outcome")),
+        _manual_run_delivery_line(res.get("delivery_target") or deliver, res.get("delivery_outcome")),
     ]
     refreshed = get_job(job_id) or {}
     if refreshed.get("next_run_at"):

@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _point_ledger(monkeypatch, tmp_path):
     import cron.executions as executions
@@ -366,7 +368,7 @@ def test_run_one_job_records_running_then_terminal(monkeypatch):
     assert events[-1][0:2] == ("finish", "exec-3")
     assert events[-1][2]["success"] is True
     assert events[-1][2]["delivery_outcome"] == "suppressed"
-    assert delivery_result == {"delivery_outcome": "suppressed"}
+    assert delivery_result == {"delivery_outcome": "suppressed", "delivery_target": "local"}
 
 
 def test_run_one_job_reports_silent_delivery_suppression(monkeypatch):
@@ -407,7 +409,7 @@ def test_run_one_job_reports_silent_delivery_suppression(monkeypatch):
 
     deliver.assert_not_called()
     assert finished[-1]["delivery_outcome"] == "suppressed"
-    assert delivery_result == {"delivery_outcome": "suppressed"}
+    assert delivery_result == {"delivery_outcome": "suppressed", "delivery_target": "matrix:room"}
 
 
 def test_run_one_job_reports_crash_delivery_outcome_to_collector(monkeypatch):
@@ -422,7 +424,7 @@ def test_run_one_job_reports_crash_delivery_outcome_to_collector(monkeypatch):
         "run_job",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("run crashed")),
     )
-    monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scheduler, "_upsert_incident_for_failure", lambda *_args, **_kwargs: (False, None))
 
@@ -432,7 +434,48 @@ def test_run_one_job_reports_crash_delivery_outcome_to_collector(monkeypatch):
         delivery_result=delivery_result,
     ) is False
 
-    assert delivery_result == {"delivery_outcome": "delivered"}
+    assert delivery_result == {"delivery_outcome": "delivered", "delivery_target": "matrix:room"}
+
+
+@pytest.mark.parametrize("terminal_state", ["accepted", "rejected", "raises", "interrupted"])
+def test_crash_delivery_collector_requires_terminal_mark(monkeypatch, terminal_state):
+    import cron.scheduler as scheduler
+
+    monkeypatch.setattr(scheduler, "heartbeat_fire_claim", lambda *_args, **_kw: True)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    monkeypatch.setattr(scheduler, "finish_execution", lambda *_args, **_kw: None)
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
+    monkeypatch.setattr(
+        scheduler, "run_job", MagicMock(side_effect=RuntimeError("run crashed")),
+    )
+    monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kw: None)
+    monkeypatch.setattr(scheduler, "_upsert_incident_for_failure", lambda *_args, **_kw: (False, None))
+    monkeypatch.setattr(
+        scheduler, "_consume_interrupted_flag", lambda *_args: terminal_state == "interrupted",
+    )
+    mark = MagicMock(
+        return_value=terminal_state == "accepted",
+        side_effect=RuntimeError("terminal mark failed") if terminal_state == "raises" else None,
+    )
+    monkeypatch.setattr(scheduler, "mark_job_run", mark)
+
+    delivery_result = {}
+    assert scheduler.run_one_job(
+        {
+            "id": "crash-fenced", "execution_id": "exec-crash-fenced",
+            "deliver": "matrix:room", "fire_claim": {"by": "original-owner"},
+        },
+        delivery_result=delivery_result,
+    ) is False
+
+    if terminal_state == "accepted":
+        assert delivery_result["delivery_outcome"] == "delivered"
+    else:
+        assert delivery_result == {}
+    if terminal_state == "interrupted":
+        mark.assert_not_called()
+    else:
+        assert mark.call_args.kwargs["expected_fire_owner"] == "original-owner"
 
 
 def test_provider_start_recovers_interrupted_records_before_tick(monkeypatch):

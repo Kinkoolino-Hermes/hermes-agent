@@ -17,7 +17,7 @@ always say saved-locally.
 
 import contextlib
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -179,6 +179,58 @@ class TestDeliveryNote:
         note = _manual_run_delivery_note("telegram", {"last_delivery_error": "E" * 500})
         assert "E" * 200 in note
         assert "E" * 201 not in note
+
+
+@pytest.mark.parametrize("normal_target", ["origin", "local"])
+@pytest.mark.parametrize("failure_target", ["matrix:ops", "local"])
+@pytest.mark.parametrize("run_state", ["ok", "failed", "crashed"])
+def test_completion_uses_scheduler_effective_delivery_lane(
+    monkeypatch, normal_target, failure_target, run_state,
+):
+    import cron.scheduler as scheduler
+    from tools import cronjob_tools
+
+    job = {
+        "id": "effective-lane", "execution_id": "exec-effective-lane",
+        "deliver": normal_target, "failure_deliver": failure_target,
+    }
+    succeeded = run_state == "ok"
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    monkeypatch.setattr(scheduler, "finish_execution", lambda *_args, **_kw: None)
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
+    monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kw: True)
+    monkeypatch.setattr(scheduler, "save_job_output", lambda *_args: None)
+    monkeypatch.setattr(scheduler, "_upsert_incident_for_failure", lambda *_args, **_kw: (False, None))
+    monkeypatch.setattr(
+        scheduler, "run_job", MagicMock(
+            return_value=(succeeded, "output", "response", None if succeeded else "run failed"),
+            side_effect=RuntimeError("run crashed") if run_state == "crashed" else None,
+        ),
+    )
+    delivery = MagicMock(return_value=None)
+    monkeypatch.setattr(scheduler, "_deliver_result", delivery)
+    monkeypatch.setattr(cronjob_tools, "get_job", lambda _id: {
+        "last_status": "ok" if succeeded else "error",
+        "last_error": None if succeeded else "run failed",
+    })
+    monkeypatch.setattr("cron.executions.get_execution", lambda _id: {
+        "status": "completed" if succeeded else "failed",
+        "error": None if succeeded else "run failed",
+    })
+    monkeypatch.setattr(cronjob_tools, "_latest_job_output_excerpt", lambda _id: None)
+
+    result = cronjob_tools._run_claimed_job(job)
+    completion = cronjob_tools._manual_run_completion(
+        result, job["id"], "lane regression", normal_target, time.time(),
+    )
+    expected_target = normal_target if succeeded else failure_target
+    assert f"Delivery target: {expected_target} (" in completion["summary"]
+    assert result["delivery_target"] == expected_target
+    if expected_target != "local":
+        assert "saved locally only" not in completion["summary"]
+    if not succeeded:
+        assert delivery.call_count == 1
+        assert delivery.call_args.kwargs["for_failure"] is True
 
 
 class TestRunnerSummaryWiring:

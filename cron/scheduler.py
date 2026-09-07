@@ -2514,7 +2514,7 @@ def run_one_job(
     claim (callers use the store CAS) but keeps it alive. True if processed (a job failure is
     recorded via ``mark_job_run``), False only if processing raised. ``cancel_event``: optional
     transport-level cancel (dashboard drain). ``delivery_result`` optionally receives the typed
-    terminal delivery outcome for a manual-run completion."""
+    terminal delivery outcome and effective delivery target for a manual-run completion."""
     # Every gateway path (built-in scheduler, external providers, and direct
     # API fires) crosses this seam.  Ensure the detached worker has a durable
     # attempt to adopt before any launch can occur.
@@ -2818,12 +2818,13 @@ def _finish_completed_run(
             execution_id, success=False,
             error="Fire claim ownership lost before terminal completion.")
         return True
+    normalized_deliver = _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success))
     delivery_outcome = _classify_delivery_outcome(
         delivery_error=d.delivery_error,
         should_deliver=d.should_deliver,
         unresolved_origin=d.unresolved_origin,
         # Read the lane the notice was actually routed through (failure_deliver on failure).
-        normalized_deliver=_normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)),
+        normalized_deliver=normalized_deliver,
         incident_acked=d.incident_acked,
         success=d.success,
     )
@@ -2832,6 +2833,7 @@ def _finish_completed_run(
         _mark_incident_alerted(d.failure_incident_id)
     if delivery_result is not None:
         delivery_result["delivery_outcome"] = delivery_outcome
+        delivery_result["delivery_target"] = normalized_deliver
     finish_execution(
         execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
     return True
@@ -3036,8 +3038,6 @@ def _run_one_job_body(
         ):
             delivery_error, delivery_outcome = _deliver_crash_failure(
                 job, _err_text, adapters=adapters, loop=loop)
-        if delivery_result is not None:
-            delivery_result["delivery_outcome"] = delivery_outcome
         try:
             if not _consume_interrupted_flag(job["id"], execution_token):
                 mark_kwargs = {}
@@ -3045,7 +3045,11 @@ def _run_one_job_body(
                     mark_kwargs["expected_fire_owner"] = fire_owner
                 if isinstance(e, Exception):
                     mark_kwargs["delivery_error"] = delivery_error
-                mark_job_run(job["id"], False, _err_text, **mark_kwargs)
+                marked = mark_job_run(job["id"], False, _err_text, **mark_kwargs)
+                if marked and delivery_result is not None:
+                    delivery_result["delivery_outcome"] = delivery_outcome
+                    delivery_result["delivery_target"] = _normalize_deliver_value(
+                        _delivery_lane_value(job, for_failure=True))
         except Exception as record_err:
             # Never let bookkeeping mask the original interruption.
             logger.error("Failed to record interrupted run for job %s: %s", job["id"], record_err)
