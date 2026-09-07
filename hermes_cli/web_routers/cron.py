@@ -7,6 +7,8 @@ late-binding seam so ``monkeypatch.setattr(web_server_cron, ...)`` keeps working
 
 import asyncio
 import functools
+import math
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -117,13 +119,52 @@ def _get_cron_job_detail_sync(job_id: str, profile: str):
         _found(_call_cron_for_profile(selected, "get_job", job_id)))
 
 
+_PUBLIC_CRON_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+
+def _public_cron_run_time(value: Any) -> Optional[float]:
+    if type(value) not in {int, float}:
+        return None
+    try:
+        parsed = float(value)
+    except OverflowError:
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _public_cron_run(run: Any, *, now: float) -> Optional[Dict[str, Any]]:
+    """Restore the bounded run projection; unknown session fields stay private."""
+    if type(run) is not dict:
+        return None
+    run_id = run.get("id")
+    if type(run_id) is not str or not _PUBLIC_CRON_RUN_ID_RE.fullmatch(run_id):
+        return None
+    ended_raw = run.get("ended_at")
+    last_active = _public_cron_run_time(run.get("last_active"))
+    reason = run.get("end_reason")
+    statuses = {"completed": "completed", "success": "completed", "agent_close": "completed",
+                "failed": "failed", "error": "failed", "cancelled": "cancelled",
+                "interrupted": "cancelled", "timeout": "timeout"}
+    status = "running" if ended_raw is None else statuses.get(reason, "ended") if type(reason) is str else "ended"
+    archived = run.get("archived")
+    return {
+        "id": run_id, "status": status,
+        "started_at": _public_cron_run_time(run.get("started_at")),
+        "ended_at": _public_cron_run_time(ended_raw), "last_active": last_active,
+        "is_active": ended_raw is None and last_active is not None and math.isfinite(now)
+                     and 0 <= now - last_active < 300,
+        "archived": archived is True or (type(archived) is int and archived == 1),
+    }
+
+
 def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: int = 20):
     """Run sessions produced by a cron job, newest first.
 
     Runs are ordinary sessions with id ``cron_{job_id}_{timestamp}`` (see
     cron/scheduler.run_job); ``source='cron'`` plus the id prefix binds them to
-    this job. Same row shape as ``/api/sessions`` so the frontend reuses
-    SessionInfo. Backed by ``SessionDB.list_cron_job_runs`` — a bounded id-range
+    this job. Session rows are projected onto bounded public run metadata;
+    prompts, previews and unknown fields remain private.
+    Backed by ``SessionDB.list_cron_job_runs`` — a bounded id-range
     scan, so cost scales with the requested window, not total cron history.
     """
     selected = profile or _find_cron_job_profile(job_id)
@@ -141,13 +182,9 @@ def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: 
 
     db = _open_session_db_for_profile(selected, read_only=True)
     try:
-        runs = db.list_cron_job_runs(canonical, limit=limit_n, offset=0)
+        rows = db.list_cron_job_runs(canonical, limit=limit_n, offset=0)
         now = time.time()
-        for s in runs:
-            s["is_active"] = s.get("ended_at") is None and (now - s.get("last_active", s.get("started_at", 0))) < 300
-            s["archived"] = bool(s.get("archived"))
-            if selected:
-                s["profile"] = selected
+        runs = [public for row in rows if (public := _public_cron_run(row, now=now)) is not None]
         return {"runs": runs, "limit": limit_n}
     finally:
         db.close()
