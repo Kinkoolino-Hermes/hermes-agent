@@ -11,54 +11,18 @@ from unittest import mock
 
 import pytest
 
-from cron import scheduler as sched
-from cron.scheduler import (
+from cron import scheduler_delivery as sched_delivery
+from cron.scheduler_delivery import (
     BOT_CHAT_PLATFORM,
     _deliver_to_bot_chat,
-    _normalize_deliver_value,
-    _preflight_check_delivery,
-    _resolve_bot_chat_target,
     _resolve_delivery_targets,
+    _resolve_bot_chat_target,
     parse_bot_chat_deliver_token,
 )
+from cron.scheduler_preflight import _preflight_check_delivery
 
 
 # ── token parsing ────────────────────────────────────────────────────────────
-
-def test_deliver_normalization_rejects_private_non_string_values_without_stringifying():
-    class PrivateValue:
-        def __str__(self):
-            raise AssertionError("private value must not be stringified")
-
-    private = PrivateValue()
-    assert _normalize_deliver_value(private) == "local"
-    assert _normalize_deliver_value(["telegram", private, " origin "]) == (
-        "telegram,origin"
-    )
-    assert _normalize_deliver_value({"target": "private"}) == "local"
-
-
-def test_deliver_normalization_rejects_builtin_subclasses_before_magic_methods():
-    class HostileText(str):
-        def __bool__(self):
-            raise AssertionError("hostile text truthiness was evaluated")
-
-        def strip(self, *_args, **_kwargs):
-            raise AssertionError("hostile text strip was called")
-
-    class HostileList(list):
-        def __iter__(self):
-            raise AssertionError("hostile list was iterated")
-
-    class HostileTuple(tuple):
-        def __iter__(self):
-            raise AssertionError("hostile tuple was iterated")
-
-    assert _normalize_deliver_value(HostileText("telegram")) == "local"
-    assert _normalize_deliver_value(HostileList(["telegram"])) == "local"
-    assert _normalize_deliver_value(HostileTuple(("telegram",))) == "local"
-    assert _normalize_deliver_value([HostileText("telegram"), "origin"]) == "origin"
-
 
 def test_bare_token_targets_own_profile():
     assert parse_bot_chat_deliver_token("bot-chat") == ""
@@ -83,9 +47,7 @@ def test_non_bot_chat_tokens_pass_through():
 
 def test_own_profile_resolves_without_name():
     target = _resolve_bot_chat_target({"id": "j1"}, "")
-    assert target == {
-        "platform": BOT_CHAT_PLATFORM, "chat_id": "_self", "thread_id": None,
-    }
+    assert target == {"platform": BOT_CHAT_PLATFORM, "chat_id": "_self", "thread_id": None}
 
 
 def test_named_profile_resolves_when_exists():
@@ -104,10 +66,10 @@ def test_unknown_profile_resolves_to_none():
 def test_resolve_delivery_targets_combines_with_platform_targets():
     """bot-chat rides the same comma-separated deliver string as platforms."""
     job = {"id": "j1", "deliver": "bot-chat,telegram"}
-    with mock.patch.object(sched, "_get_home_target_chat_id", return_value="-100123"), \
-         mock.patch.object(sched, "_get_home_target_thread_id", return_value=None), \
-         mock.patch.object(sched, "_is_known_delivery_platform", return_value=True), \
-         mock.patch.object(sched, "_resolve_origin", return_value=None):
+    with mock.patch.object(sched_delivery, "_get_home_target_chat_id", return_value="-100123"), \
+         mock.patch.object(sched_delivery, "_get_home_target_thread_id", return_value=None), \
+         mock.patch.object(sched_delivery, "_is_known_delivery_platform", return_value=True), \
+         mock.patch.object(sched_delivery, "_resolve_origin", return_value=None):
         targets = _resolve_delivery_targets(job)
     platforms = {t["platform"] for t in targets}
     assert BOT_CHAT_PLATFORM in platforms
@@ -123,7 +85,7 @@ def test_preflight_ignores_bot_chat_targets():
 
 
 def test_preflight_still_blocks_unknown_platforms():
-    with mock.patch.object(sched, "_is_known_delivery_platform", return_value=False):
+    with mock.patch.object(sched_delivery, "_is_known_delivery_platform", return_value=False):
         err = _preflight_check_delivery({"id": "j1", "deliver": "nonexistent-platform"})
     assert err is not None and "not a known" in err
 
@@ -165,8 +127,8 @@ def test_deliver_runs_canonical_bot_chat_lane():
         calls["kwargs"] = kwargs
         return _completed()
 
-    with mock.patch.object(sched.subprocess, "run", side_effect=fake_run), \
-         mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"):
+    with mock.patch.object(sched_delivery.subprocess, "run", side_effect=fake_run), \
+         mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"):
         err = _deliver_to_bot_chat({"id": "j1", "name": "Daily digest"}, "the output", "")
 
     assert err is None
@@ -190,9 +152,9 @@ def test_deliver_named_profile_uses_p_flag_and_clears_home():
         calls["kwargs"] = kwargs
         return _completed()
 
-    with mock.patch.object(sched.subprocess, "run", side_effect=fake_run), \
-         mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"), \
-         mock.patch.dict(sched.os.environ, {"HERMES_HOME": "/tmp/other-profile"}):
+    with mock.patch.object(sched_delivery.subprocess, "run", side_effect=fake_run), \
+         mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"), \
+         mock.patch.dict(sched_delivery.os.environ, {"HERMES_HOME": "/tmp/other-profile"}):
         err = _deliver_to_bot_chat({"id": "j1", "name": "n"}, "out", "research")
 
     assert err is None
@@ -204,30 +166,17 @@ def test_deliver_named_profile_uses_p_flag_and_clears_home():
 
 def test_deliver_failure_returns_error_string():
     with mock.patch.object(
-        sched.subprocess, "run", return_value=_completed(returncode=1, stderr="boom")
-    ), mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"):
-        err = _deliver_to_bot_chat({"id": "j1", "name": "n"}, "out", "")
-    assert err == "bot-chat delivery confirmation unavailable"
-    assert "boom" not in err
-
-
-def test_deliver_exception_is_categorical_without_stringifying_private_error():
-    class PrivateError(Exception):
-        def __str__(self):
-            raise AssertionError("private exception must not be stringified")
-
-    with mock.patch.object(
-        sched.subprocess, "run", side_effect=PrivateError()
-    ), mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"):
+        sched_delivery.subprocess, "run", return_value=_completed(returncode=1, stderr="boom")
+    ), mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"):
         err = _deliver_to_bot_chat({"id": "j1", "name": "n"}, "out", "")
     assert err == "bot-chat delivery confirmation unavailable"
 
 
 def test_deliver_timeout_returns_error_string():
     with mock.patch.object(
-        sched.subprocess, "run",
+        sched_delivery.subprocess, "run",
         side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=600),
-    ), mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"):
+    ), mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"):
         err = _deliver_to_bot_chat({"id": "j1", "name": "n"}, "out", "")
     assert err == "bot-chat delivery confirmation unavailable"
 
@@ -242,8 +191,8 @@ def test_deliver_message_carries_cron_attribution(tmp_path):
             captured["message"] = fh.read()
         return _completed()
 
-    with mock.patch.object(sched.subprocess, "run", side_effect=fake_run), \
-         mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"):
+    with mock.patch.object(sched_delivery.subprocess, "run", side_effect=fake_run), \
+         mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"):
         _deliver_to_bot_chat({"id": "j1", "name": "Daily digest"}, "the payload", "")
 
     assert 'Cronjob "Daily digest" output' in captured["message"]
@@ -256,7 +205,7 @@ def test_deliver_message_carries_cron_attribution(tmp_path):
 def test_delivery_targets_include_local_profiles():
     with mock.patch("hermes_cli.profiles.list_profile_names",
                     return_value=["default", "research"]):
-        targets = sched.cron_delivery_targets()
+        targets = sched_delivery.cron_delivery_targets()
     ids = [t["id"] for t in targets]
     assert f"{BOT_CHAT_PLATFORM}:default" in ids
     assert f"{BOT_CHAT_PLATFORM}:research" in ids

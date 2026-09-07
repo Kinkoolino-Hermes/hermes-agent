@@ -338,6 +338,23 @@ async def test_matrix_send_ack_emits_exact_transport_receipt():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ack", [None, False, object()])
+async def test_matrix_send_does_not_stringify_invalid_provider_ack(ack):
+    adapter = _make_adapter()
+    adapter._client = MagicMock()
+    adapter._client.send_message_event = AsyncMock(return_value=ack)
+
+    result = await adapter.send("!room:example.org", "hello")
+
+    assert result.success is False
+    assert result.receipt is not None
+    assert result.receipt.outcome == "unknown"
+    assert result.receipt.provider_message_id is None
+    assert result.retryable is False
+    adapter._client.send_message_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_matrix_threaded_ack_preserves_requested_and_actual_transport_targets():
     adapter = _make_adapter()
     adapter._client = MagicMock()

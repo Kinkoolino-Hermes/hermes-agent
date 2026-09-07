@@ -13,6 +13,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from hermes_cli import web_server
+import hermes_cli.web_server_cron as _web_server_cron
 
 
 def test_blueprint_list_redacts_unexpected_runtime_error(monkeypatch):
@@ -56,7 +57,7 @@ def test_cron_fire_profile_lookup_off_loop(monkeypatch, loop_probe):
         probe("find")
         return None
 
-    monkeypatch.setattr(web_server, "_find_cron_job_profile", fake_find)
+    monkeypatch.setattr(_web_server_cron, "_find_cron_job_profile", fake_find)
 
     import plugins.cron_providers.chronos.verify as chv
     monkeypatch.setattr(chv, "get_fire_verifier", lambda: (lambda **kw: {"sub": "t"}))
@@ -94,7 +95,7 @@ def test_blueprint_instantiate_create_job_off_loop(monkeypatch, loop_probe):
             "future_runtime_field": "RAW_BLUEPRINT_FUTURE",
         }
 
-    monkeypatch.setattr(web_server, "_call_cron_for_profile", fake_call)
+    monkeypatch.setattr(_web_server_cron, "_call_cron_for_profile", fake_call)
     monkeypatch.setattr(web_server, "_has_valid_session_token", lambda req: True)
 
     import cron.blueprint_catalog as bc
@@ -107,7 +108,7 @@ def test_blueprint_instantiate_create_job_off_loop(monkeypatch, loop_probe):
 
     client = TestClient(web_server.app)
     resp = client.post(
-        "/api/cron/blueprints/instantiate",
+        "/api/cron/blueprints/instantiate?profile=default",
         json={"blueprint": "morning-brief", "values": {}},
     )
     assert resp.status_code == 200
@@ -144,7 +145,7 @@ def test_blueprint_instantiate_reports_saved_but_unregistered(monkeypatch):
     def fail_call(profile, fn, *args, **kwargs):
         raise failure
 
-    monkeypatch.setattr(web_server, "_call_cron_for_profile", fail_call)
+    monkeypatch.setattr(_web_server_cron, "_call_cron_for_profile", fail_call)
     monkeypatch.setattr(web_server, "_has_valid_session_token", lambda req: True)
 
     import cron.blueprint_catalog as bc
@@ -157,7 +158,7 @@ def test_blueprint_instantiate_reports_saved_but_unregistered(monkeypatch):
 
     client = TestClient(web_server.app)
     resp = client.post(
-        "/api/cron/blueprints/instantiate",
+        "/api/cron/blueprints/instantiate?profile=default",
         json={"blueprint": "morning-brief", "values": {}},
     )
     assert resp.status_code == 424
@@ -173,7 +174,7 @@ def test_blueprint_instantiate_redacts_unexpected_runtime_error(monkeypatch):
     sentinel = "RAW_BLUEPRINT_RUNTIME user@example.org /private/reconcile.json"
 
     monkeypatch.setattr(
-        web_server,
+        _web_server_cron,
         "_call_cron_for_profile",
         lambda *args, **kwargs: {"id": "bp-created-job", "name": "bp job"},
     )
@@ -181,7 +182,7 @@ def test_blueprint_instantiate_redacts_unexpected_runtime_error(monkeypatch):
     def fail_reconcile(*args, **kwargs):
         raise OSError(sentinel)
 
-    monkeypatch.setattr(web_server, "_notify_cron_provider_for_profile", fail_reconcile)
+    monkeypatch.setattr(_web_server_cron, "_notify_cron_provider_for_profile", fail_reconcile)
     monkeypatch.setattr(web_server, "_has_valid_session_token", lambda req: True)
 
     import cron.blueprint_catalog as bc
@@ -194,7 +195,7 @@ def test_blueprint_instantiate_redacts_unexpected_runtime_error(monkeypatch):
 
     client = TestClient(web_server.app)
     resp = client.post(
-        "/api/cron/blueprints/instantiate",
+        "/api/cron/blueprints/instantiate?profile=default",
         json={"blueprint": "morning-brief", "values": {}},
     )
 

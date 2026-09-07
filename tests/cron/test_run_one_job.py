@@ -13,6 +13,7 @@ extracted helper directly.
 import pytest
 
 import cron.scheduler as s
+import cron.scheduler_delivery as sched_delivery
 
 
 def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final response",
@@ -97,7 +98,7 @@ def test_run_one_job_uses_unknown_delivery_outcome_from_receipt_ledger(monkeypat
     )
     monkeypatch.setattr(s, "mark_job_run", lambda *_a, **_kw: None)
     monkeypatch.setattr(
-        s,
+        sched_delivery,
         "receipt_summary",
         lambda _execution_id: {
             "delivered": 0, "failed": 0, "unknown": 1, "targets_delivered": 0,
@@ -134,7 +135,7 @@ def test_run_one_job_keeps_concrete_delivery_error_failed_despite_text_ack(
     )
     monkeypatch.setattr(s, "mark_job_run", lambda *_a, **_kw: None)
     monkeypatch.setattr(
-        s,
+        sched_delivery,
         "receipt_summary",
         lambda _execution_id: {
             "delivered": 1, "failed": 0, "unknown": 0, "targets_delivered": 1,

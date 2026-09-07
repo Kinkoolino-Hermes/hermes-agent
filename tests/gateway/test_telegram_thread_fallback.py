@@ -585,6 +585,27 @@ async def test_telegram_preregistered_media_timeout_never_falls_back(
 
 
 @pytest.mark.asyncio
+async def test_telegram_receipt_bound_voice_caption_timeout_never_retries(tmp_path):
+    adapter = _make_adapter()
+    adapter.format_message = lambda content: content
+    sender = AsyncMock(side_effect=TimeoutError("parse request timed out"))
+    adapter._bot = SimpleNamespace(send_voice=sender)
+    media = tmp_path / "voice.ogg"
+    media.write_bytes(b"voice")
+
+    result = await adapter.send_voice(
+        "123", str(media), caption="caption",
+        metadata={"_transport_receipt_component": "media", "_transport_receipt_ordinal": 0},
+    )
+
+    sender.assert_awaited_once()
+    assert result.success is False
+    assert result.receipt is not None
+    assert result.receipt.outcome == "unknown"
+    assert result.retryable is False
+
+
+@pytest.mark.asyncio
 async def test_telegram_photo_timeout_with_dimension_marker_never_falls_back(
     tmp_path, monkeypatch,
 ):

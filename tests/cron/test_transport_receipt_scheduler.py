@@ -9,7 +9,7 @@ import subprocess
 from concurrent.futures import Future
 from unittest.mock import AsyncMock, patch
 
-from cron.scheduler import _deliver_result
+from cron.scheduler_delivery import _deliver_result
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import SendResult, TransportReceipt, TransportTarget
 
@@ -164,8 +164,8 @@ def _job() -> dict:
 
 
 def test_standalone_telegram_preregistration_uses_exact_formatted_chunks():
-    from cron.scheduler import _receipt_text_chunks_for_target
-    from tools.send_message_tool import _plan_standalone_telegram_text
+    from cron.scheduler_delivery import _receipt_text_chunks_for_target
+    from tools.send_message_senders import _plan_standalone_telegram_text
 
     content = ("- bounded item!\n" * 300).strip()
     _formatted, actual_chunks, _has_html, _caption = (
@@ -179,7 +179,7 @@ def test_standalone_telegram_preregistration_uses_exact_formatted_chunks():
 
 
 def test_scheduler_rejects_hostile_adapter_plan_and_receipt_containers():
-    from cron.scheduler import (
+    from cron.scheduler_delivery import (
         _confirm_adapter_delivery,
         _persist_target_text_receipts,
         _receipt_text_chunks_for_target,
@@ -230,7 +230,7 @@ def test_scheduler_rejects_hostile_adapter_plan_and_receipt_containers():
 
 
 def test_persisted_non_delivered_receipts_do_not_satisfy_component_plan():
-    from cron.scheduler import _persist_target_text_receipts
+    from cron.scheduler_delivery import _persist_target_text_receipts
 
     target = TransportTarget("telegram", "123")
     attempts = {("telegram", "123", "", "media", 0): "attempt"}
@@ -252,14 +252,14 @@ def test_persisted_non_delivered_receipts_do_not_satisfy_component_plan():
     )
 
     for receipt in receipts:
-        with patch("cron.scheduler.record_transport_receipt", return_value=True):
+        with patch("cron.scheduler_delivery.record_transport_receipt", return_value=True):
             assert _persist_target_text_receipts(
                 (receipt,), attempts, requested, components={"media"}
             ) is False
 
 
 def test_delivered_receipt_to_different_actual_target_does_not_satisfy_plan():
-    from cron.scheduler import _persist_target_text_receipts
+    from cron.scheduler_delivery import _persist_target_text_receipts
 
     requested_target = TransportTarget("telegram", "123", "topic-7")
     actual_target = TransportTarget("telegram", "123")
@@ -278,15 +278,15 @@ def test_delivered_receipt_to_different_actual_target_does_not_satisfy_plan():
         ordinal=0,
     )
 
-    with patch("cron.scheduler.record_transport_receipt", return_value=True):
+    with patch("cron.scheduler_delivery.record_transport_receipt", return_value=True):
         assert _persist_target_text_receipts(
             (receipt,), attempts, requested, components={"text"}
         ) is False
 
 
 def test_standalone_telegram_caption_preregistration_omits_unsent_text_component():
-    from cron.scheduler import _receipt_text_chunks_for_target
-    from tools.send_message_tool import _plan_standalone_telegram_text
+    from cron.scheduler_delivery import _receipt_text_chunks_for_target
+    from tools.send_message_senders import _plan_standalone_telegram_text
 
     media = [("/tmp/bounded-image.jpg", False)]
     content = "bounded caption"
@@ -307,7 +307,7 @@ def test_scheduler_uses_standalone_telegram_plan_when_adapter_loop_is_unavailabl
 ):
     import cron.executions as executions
     from gateway.config import Platform
-    from tools.send_message_tool import _plan_standalone_telegram_text
+    from tools.send_message_senders import _plan_standalone_telegram_text
 
     monkeypatch.setattr(
         executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db"
@@ -319,7 +319,7 @@ def test_scheduler_uses_standalone_telegram_plan_when_adapter_loop_is_unavailabl
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch(
             "tools.send_message_tool._send_to_platform",
             return_value={"error": "standalone send rejected before provider ack"},
@@ -349,7 +349,7 @@ def test_scheduler_preregisters_and_persists_every_planned_text_chunk(monkeypatc
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
     ):
         result = _deliver_result(
@@ -373,8 +373,8 @@ def test_receipt_preregistration_failure_stops_before_adapter_send(monkeypatch):
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
-        patch("cron.scheduler.preregister_receipt_plan", side_effect=RuntimeError("private database path")),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.preregister_receipt_plan", side_effect=RuntimeError("private database path")),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
     ):
         result = _deliver_result(
@@ -408,7 +408,7 @@ def test_scheduler_rejects_target_subclasses_before_magic_methods(monkeypatch):
     job["origin"] = {"platform": "telegram", "chat_id": HostileText("123")}
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
     ):
         result = _deliver_result(
@@ -433,7 +433,7 @@ def test_scheduler_rejects_execution_identity_subclasses_before_magic_methods():
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
     ):
         result = _deliver_result(
@@ -456,7 +456,7 @@ def test_partial_chunk_ack_is_retained_without_standalone_retry(monkeypatch, tmp
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
         patch("tools.send_message_tool._send_to_platform", new=standalone_calls),
     ):
@@ -486,9 +486,9 @@ def test_text_ack_with_opaque_media_remains_partial_and_target_unknown(monkeypat
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
-        patch("cron.scheduler._send_media_via_adapter", return_value=[]),
+        patch("cron.scheduler_delivery._send_media_via_adapter", return_value=[]),
     ):
         result = _deliver_result(
             _job(), f"report\nMEDIA:{media}",
@@ -519,7 +519,7 @@ def test_live_adapter_typed_media_ack_completes_planned_target(monkeypatch, tmp_
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
     ):
         result = _deliver_result(
@@ -554,11 +554,11 @@ def test_live_adapter_unknown_media_ack_stays_partial_without_session_side_effec
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
-        patch("cron.scheduler._open_continuable_cron_thread", return_value="created-thread"),
-        patch("cron.scheduler._seed_cron_thread_session") as seed_thread,
-        patch("cron.scheduler._maybe_mirror_cron_delivery") as mirror_delivery,
+        patch("cron.scheduler_delivery._open_continuable_cron_thread", return_value="created-thread"),
+        patch("cron.scheduler_delivery._seed_cron_thread_session") as seed_thread,
+        patch("cron.scheduler_delivery._maybe_mirror_cron_delivery") as mirror_delivery,
     ):
         result = _deliver_result(
             job, f"report\nMEDIA:{media}",
@@ -596,10 +596,10 @@ def test_live_adapter_media_error_prevents_delivery_side_effects_even_with_deliv
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
-        patch("cron.scheduler._open_continuable_cron_thread", return_value=None),
-        patch("cron.scheduler._maybe_mirror_cron_delivery") as mirror_delivery,
+        patch("cron.scheduler_delivery._open_continuable_cron_thread", return_value=None),
+        patch("cron.scheduler_delivery._maybe_mirror_cron_delivery") as mirror_delivery,
         patch("tools.send_message_tool._send_to_platform", new=standalone_calls),
     ):
         result = _deliver_result(
@@ -631,11 +631,11 @@ def test_new_continuation_thread_preserves_preregistered_requested_target(monkey
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("asyncio.run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe),
-        patch("cron.scheduler._open_continuable_cron_thread", return_value="created-thread") as open_thread,
-        patch("cron.scheduler._seed_cron_thread_session"),
-        patch("cron.scheduler._maybe_mirror_cron_delivery"),
+        patch("cron.scheduler_delivery._open_continuable_cron_thread", return_value="created-thread") as open_thread,
+        patch("cron.scheduler_delivery._seed_cron_thread_session"),
+        patch("cron.scheduler_delivery._maybe_mirror_cron_delivery"),
     ):
         result = _deliver_result(
             job, "continuable brief",
@@ -676,7 +676,7 @@ def test_standalone_typed_receipt_is_persisted(monkeypatch, tmp_path):
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("tools.send_message_tool._send_to_platform", return_value=standalone_result),
     ):
         result = _deliver_result(
@@ -698,7 +698,7 @@ def test_standalone_legacy_success_remains_unknown(monkeypatch, tmp_path):
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("tools.send_message_tool._send_to_platform", return_value={"success": True, "message_id": "legacy"}),
     ):
         result = _deliver_result(
@@ -717,7 +717,7 @@ def test_bot_chat_exit_zero_persists_observed_unknown_for_exact_query_bytes(
     monkeypatch, tmp_path
 ):
     import cron.executions as executions
-    import cron.scheduler as scheduler
+    import cron.scheduler_delivery as scheduler
 
     monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db")
     execution = executions.create_execution("bot-receipt", source="direct")
@@ -732,8 +732,8 @@ def test_bot_chat_exit_zero_persists_observed_unknown_for_exact_query_bytes(
     job = {"id": "bot-receipt", "name": "bot receipt", "deliver": "bot-chat:research"}
     with (
         patch("gateway.config.load_gateway_config", return_value=GatewayConfig()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
-        patch("cron.scheduler._resolve_delivery_targets", return_value=[{
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery._resolve_delivery_targets", return_value=[{
             "platform": "bot-chat", "chat_id": "research", "thread_id": None,
         }]),
         patch.object(scheduler.shutil, "which", return_value="/usr/bin/hermes"),
@@ -786,7 +786,7 @@ def test_standalone_text_ack_with_opaque_media_remains_partial(monkeypatch, tmp_
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("tools.send_message_tool._send_to_platform", return_value=standalone_result),
     ):
         result = _deliver_result(
@@ -830,7 +830,7 @@ def test_standalone_typed_text_and_media_acks_complete_target(monkeypatch, tmp_p
 
     with (
         patch("gateway.config.load_gateway_config", return_value=_gateway_config()),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch("cron.scheduler_delivery.load_config", return_value={"cron": {"wrap_response": False}}),
         patch("tools.send_message_tool._send_to_platform", return_value=standalone_result),
     ):
         result = _deliver_result(

@@ -412,7 +412,8 @@ def test_claim_fire_persists_attempt_before_fire_claimed(monkeypatch):
     monkeypatch.setattr(
         executions,
         "create_execution",
-        lambda jid, source: events.append("ledger") or {"id": "exec-1"},
+        lambda jid, source, _create=executions.create_execution:
+        events.append("ledger") or _create(jid, source=source),
     )
     monkeypatch.setattr(
         executions,
@@ -430,9 +431,9 @@ def test_claim_fire_persists_attempt_before_fire_claimed(monkeypatch):
 
     assert events == ["ledger", "claim", "bind"]
     assert claimed is not None
-    assert claimed["execution_id"] == "exec-1"
+    assert executions.get_execution(claimed["execution_id"])["status"] == "claimed"
     assert provider.fire_claimed(claimed) is True
-    assert events == ["ledger", "claim", "bind", ("run", "exec-1")]
+    assert events == ["ledger", "claim", "bind", ("run", claimed["execution_id"])]
 
 
 def test_claim_fire_binds_scheduled_fire_before_provider_dispatch(monkeypatch):
@@ -440,6 +441,7 @@ def test_claim_fire_binds_scheduled_fire_before_provider_dispatch(monkeypatch):
     import cron.jobs as jobs
     from cron.scheduler_provider import InProcessCronScheduler
 
+    monkeypatch.setattr(executions, "set_execution_occurrence", lambda *args: None)
     created = []
     monkeypatch.setattr(jobs, "get_job", lambda _jid: {
         "id": "j1", "next_run_at": "2026-08-22T19:00:00+00:00",
@@ -474,6 +476,7 @@ def test_claim_fire_binds_identity_from_acquired_claim_not_stale_pre_read(monkey
     import cron.jobs as jobs
     from cron.scheduler_provider import InProcessCronScheduler
 
+    monkeypatch.setattr(executions, "set_execution_occurrence", lambda *args: None)
     events = []
     stale_due = "2026-08-22T19:00:00+00:00"
     acquired_at = "2026-08-22T20:00:00+00:00"
@@ -516,6 +519,7 @@ def test_claim_fire_reuses_immutable_timestamp_identity_for_stale_recovery(monke
     import cron.jobs as jobs
     from cron.scheduler_provider import InProcessCronScheduler
 
+    monkeypatch.setattr(executions, "set_execution_occurrence", lambda *args: None)
     created = []
     fire_at = "2026-08-22T19:00:00+00:00"
     monkeypatch.setattr(jobs, "get_job", lambda _jid: {
@@ -599,6 +603,7 @@ def test_fire_due_forwards_manual_force_to_store_claim(monkeypatch):
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
+    monkeypatch.setattr(executions, "set_execution_occurrence", lambda *args: None)
     claims = []
     events = []
     fire_at = "2026-08-22T19:00:00+00:00"
@@ -642,6 +647,7 @@ def test_force_claim_without_immutable_timestamp_fails_before_dispatch(monkeypat
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
+    monkeypatch.setattr(executions, "set_execution_occurrence", lambda *args: None)
     monkeypatch.setattr(
         jobs,
         "claim_job_for_fire",

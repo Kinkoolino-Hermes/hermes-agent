@@ -48,7 +48,7 @@ async def test_standalone_telegram_preserves_every_text_ack_and_target():
         patch("telegram.Bot", return_value=object()),
         patch("plugins.platforms.telegram.adapter.TelegramAdapter.format_message", return_value="formatted"),
         patch("gateway.platforms.base.BasePlatformAdapter.truncate_message", return_value=["one", "two"]),
-        patch("tools.send_message_tool._send_telegram_message_with_retry", new=AsyncMock(side_effect=messages)),
+        patch("tools.send_message_senders._send_telegram_message_with_retry", new=AsyncMock(side_effect=messages)),
     ):
         result = await _send_telegram("test-token", "-100123", "report", thread_id="7")
 
@@ -86,7 +86,7 @@ async def test_standalone_telegram_text_ack_uses_inert_provider_id_normalization
             return_value=["one"],
         ),
         patch(
-            "tools.send_message_tool._send_telegram_message_with_retry",
+            "tools.send_message_senders._send_telegram_message_with_retry",
             new=sender,
         ),
     ):
@@ -135,7 +135,7 @@ async def test_standalone_telegram_invalid_text_ack_is_unknown_without_magic():
             return_value=["one"],
         ),
         patch(
-            "tools.send_message_tool._send_telegram_message_with_retry",
+            "tools.send_message_senders._send_telegram_message_with_retry",
             new=sender,
         ),
     ):
@@ -170,7 +170,7 @@ async def test_receipt_bound_standalone_telegram_does_not_plaintext_retry_parse_
             return_value=["formatted"],
         ),
         patch(
-            "tools.send_message_tool._send_telegram_message_with_retry",
+            "tools.send_message_senders._send_telegram_message_with_retry",
             new=sender,
         ),
     ):
@@ -193,7 +193,7 @@ async def test_standalone_telegram_thread_fallback_keeps_requested_target_truthf
         patch("plugins.platforms.telegram.adapter.TelegramAdapter.format_message", return_value="formatted"),
         patch("gateway.platforms.base.BasePlatformAdapter.truncate_message", return_value=["one"]),
         patch(
-            "tools.send_message_tool._send_telegram_message_with_retry",
+            "tools.send_message_senders._send_telegram_message_with_retry",
             new=AsyncMock(side_effect=[
                 RuntimeError("Message thread not found"),
                 SimpleNamespace(message_id=103),
@@ -230,6 +230,59 @@ async def test_standalone_telegram_preserves_media_provider_ack(tmp_path):
     assert receipt.ordinal == 0
     assert receipt.requested_target.thread_id == "7"
     assert receipt.actual_target.thread_id == "7"
+
+
+@pytest.mark.asyncio
+async def test_standalone_media_thread_fallback_records_actual_target(tmp_path):
+    from tools.send_message_senders import _send_telegram
+
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"image")
+    sender = AsyncMock(side_effect=[
+        RuntimeError("Message thread not found"), SimpleNamespace(message_id=202),
+    ])
+    with patch("telegram.Bot", return_value=SimpleNamespace(send_photo=sender)):
+        result = await _send_telegram(
+            "test-token", "-100123", "", thread_id="7", media_files=[(str(image), False)],
+        )
+
+    receipt = result["receipts"][0]
+    assert receipt.requested_target.thread_id == "7"
+    assert receipt.actual_target.thread_id is None
+    assert sender.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_standalone_partial_text_failure_keeps_prior_receipt():
+    from tools.send_message_senders import _send_telegram
+
+    sender = AsyncMock(side_effect=[SimpleNamespace(message_id=203), TimeoutError("unknown")])
+    with (
+        patch("telegram.Bot", return_value=object()),
+        patch("gateway.platforms.base.BasePlatformAdapter.truncate_message", return_value=["one", "two"]),
+        patch("tools.send_message_senders._send_telegram_message_with_retry", sender),
+    ):
+        result = await _send_telegram("test-token", "-100123", "report", receipt_bound=True)
+
+    assert "error" in result
+    assert result["receipts"][0].provider_message_id == "203"
+    assert sender.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_receipt_bound_media_does_not_retry_ambiguous_caption_error(tmp_path):
+    from tools.send_message_senders import _send_telegram
+
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"image")
+    sender = AsyncMock(side_effect=TimeoutError("caption send timed out"))
+    with patch("telegram.Bot", return_value=SimpleNamespace(send_photo=sender)):
+        result = await _send_telegram(
+            "test-token", "-100123", "caption", media_files=[(str(image), False)], receipt_bound=True,
+        )
+
+    assert "error" in result
+    sender.assert_awaited_once()
 
 
 @pytest.mark.asyncio
