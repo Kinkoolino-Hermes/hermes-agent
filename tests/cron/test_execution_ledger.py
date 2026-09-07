@@ -982,9 +982,11 @@ def test_cron_runs_cli_prints_execution_history(monkeypatch, tmp_path, capsys):
     cron_runs("cli-job", limit=10)
 
     output = capsys.readouterr().out
-    assert row["id"] in output
-    assert "failed" in output
-    assert "Failure kind: execution_failed" in output
+    assert row["id"] not in output
+    assert "status=failed" in output
+    assert "job=cli-job" in output
+    assert "error=failed" in output
+    assert "Receipt: delivered=0 failed=0 unknown=0 targets_delivered=0" in output
     assert "boom" not in output
     assert "Receipt: delivered=0 failed=0 unknown=0" in output
 

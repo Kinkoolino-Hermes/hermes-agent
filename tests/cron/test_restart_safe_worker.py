@@ -366,6 +366,10 @@ def test_worker_delivery_queue_is_keyed_by_the_delivering_jobs_own_execution(
     ``hermes cron run <other>``) must not queue under the OUTER execution id."""
     import cron.scheduler as scheduler
     import cron.scheduler_delivery as scheduler_delivery
+    from cron import executions
+
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "executions.db")
+    inner = executions.create_execution("job-2", source="direct")
 
     queued = []
     monkeypatch.setattr(
@@ -388,8 +392,8 @@ def test_worker_delivery_queue_is_keyed_by_the_delivering_jobs_own_execution(
     def _standalone(*_args, **_kwargs):
         raise RuntimeError("standalone path reached")
 
-    # First call the standalone (non-queue) path makes after the guard; the
-    # failure is reported as the delivery error string.
+    # After preregistering the real inner execution, the standalone path
+    # reaches gateway config; the failure is returned without queueing.
     monkeypatch.setattr("gateway.config.load_gateway_config", _standalone)
     monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", "exec-outer")
 
@@ -405,7 +409,8 @@ def test_worker_delivery_queue_is_keyed_by_the_delivering_jobs_own_execution(
     # A different job's attempt: must NOT be queued under exec-outer; it falls
     # through to the standalone path.
     error = scheduler._deliver_result(
-        {"id": "job-2", "execution_id": "exec-inner", "deliver": "telegram:123"},
+        {"id": "job-2", "execution_id": inner["id"], "fire_identity": inner["fire_identity"],
+         "deliver": "telegram:123"},
         "done",
         adapters=None,
         loop=None,

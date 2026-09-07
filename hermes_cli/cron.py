@@ -250,25 +250,30 @@ def cron_tick():
     return 0
 
 
+_PUBLIC_EXECUTION_STATUSES = frozenset({"claimed", "running", "completed", "failed", "unknown"})
+_PUBLIC_EXECUTION_SOURCES = frozenset({"builtin", "control", "direct", "external", "manual", "recovery"})
+
+
 def cron_runs(job_id: Optional[str] = None, limit: int = 20):
-    """Show indexed durable cron execution history."""
+    """Show bounded durable cron execution history without ledger identities."""
     from cron.executions import list_executions, receipt_summary
     records = list_executions(job_id=job_id, limit=limit)
     if not records:
         print("No cron execution attempts recorded.")
         return
     for record in records:
-        print(f"{record.get('id', '?')}  {record.get('status', '?'):<9}  "
-              f"job={record.get('job_id', '?')}  source={record.get('source', '?')}  "
-              f"{record.get('claimed_at', '?')}")
+        status = record.get("status")
+        public_status = status if type(status) is str and status in _PUBLIC_EXECUTION_STATUSES else "unknown"
+        source = record.get("source")
+        public_source = source if type(source) is str and source in _PUBLIC_EXECUTION_SOURCES else "unknown"
+        print(f"status={public_status:<9}  job={record.get('job_id', '?')}  source={public_source}  "
+              f"error={'failed' if public_status == 'failed' else 'none'}")
         summary = receipt_summary(str(record.get("id", "")))
         print(
             "    Receipt: "
             f"delivered={summary['delivered']} failed={summary['failed']} "
             f"unknown={summary['unknown']} targets_delivered={summary['targets_delivered']}"
         )
-        if record.get("error_kind"):
-            print(f"    Failure kind: {record['error_kind']}")
 
 
 _INCIDENT_STATE_COLORS = {"detected": Colors.RED, "alerted": Colors.YELLOW, "closed": Colors.GREEN}

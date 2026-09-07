@@ -38,6 +38,43 @@ async def test_send_via_adapter_preserves_partial_receipts_on_failure():
 
 
 @pytest.mark.asyncio
+async def test_legacy_adapter_success_does_not_invent_transport_receipts():
+    from tools.send_message_tool import _send_via_adapter
+
+    legacy = SimpleNamespace(success=True, message_id="legacy-id", error=None)
+    adapter = SimpleNamespace(send=AsyncMock(return_value=legacy))
+    with patch("tools.send_message_tool._live_adapter", return_value=(SimpleNamespace(), adapter)):
+        result = await _send_via_adapter(Platform.MATRIX, SimpleNamespace(extra={}), "!room:example.org", "report")
+
+    assert result["success"] is True
+    assert result["receipts"] == ()
+
+
+@pytest.mark.asyncio
+async def test_live_adapter_media_preserves_partial_receipts(tmp_path):
+    from tools.send_message_tool import _send_live_adapter_media
+
+    target = TransportTarget("matrix", "!room:example.org")
+    first = TransportReceipt(outcome="delivered", provider_message_id="$first", requested_target=target,
+                             actual_target=target, component="media", ordinal=0)
+    second = TransportReceipt(outcome="unknown", requested_target=target, component="media", ordinal=1)
+    results = iter((SendResult(success=True, message_id="$first", receipt=first),
+                    SendResult(success=False, error="ambiguous", receipt=second)))
+
+    class Adapter:
+        async def send_document(self, *args, **kwargs):
+            return next(results)
+
+    paths = [tmp_path / "one.pdf", tmp_path / "two.pdf"]
+    for path in paths:
+        path.write_bytes(b"media")
+    result = await _send_live_adapter_media(Adapter(), target.chat_id, "", [(str(p), False) for p in paths])
+
+    assert "error" in result
+    assert result["receipts"] == (first, second)
+
+
+@pytest.mark.asyncio
 async def test_standalone_telegram_preserves_every_text_ack_and_target():
     pytest.importorskip("telegram")
     from tools.send_message_tool import _send_telegram
@@ -368,6 +405,28 @@ async def test_matrix_send_core_preserves_typed_receipts_on_success_and_failure(
     ))
     failed = await _matrix_send_core(adapter, target.chat_id, "report", [], None)
     assert failed["receipts"] == (receipts[0],)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_exists", [False, True])
+async def test_matrix_media_failure_keeps_prior_text_receipt(tmp_path, media_exists):
+    from tools.send_message_senders import _matrix_send_core
+
+    target = TransportTarget("matrix", "!room:example.org")
+    receipt = TransportReceipt(outcome="delivered", provider_message_id="$text", requested_target=target,
+                               actual_target=target)
+    path = tmp_path / "document.pdf"
+    if media_exists:
+        path.write_bytes(b"media")
+    adapter = SimpleNamespace(
+        send=AsyncMock(return_value=SendResult(success=True, message_id="$text", receipt=receipt)),
+        send_document=AsyncMock(side_effect=TimeoutError("unknown media outcome")),
+    )
+    result = await _matrix_send_core(adapter, target.chat_id, "text", [(str(path), False)], None)
+
+    assert "error" in result
+    assert result["receipts"] == (receipt,)
+    assert adapter.send_document.await_count == int(media_exists)
 
 
 def test_cron_tool_execution_surface_is_bounded_and_redacted(monkeypatch, tmp_path):

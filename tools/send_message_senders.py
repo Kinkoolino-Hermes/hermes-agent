@@ -579,16 +579,21 @@ async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
     last_result, receipts = None, []
     if message.strip():
         last_result = await adapter.send(chat_id, message, metadata=metadata)
-        receipts.extend(last_result.receipts)
+        receipts.extend(getattr(last_result, "receipts", ()))
         if not last_result.success:
             return {**_error(f"Matrix send failed: {last_result.error}"), "receipts": tuple(receipts)}
     for media_path, is_voice in media_files:
         if not os.path.exists(media_path):
-            return _error(f"Media file not found: {media_path}")
+            return {**_error(f"Media file not found: {media_path}"), "receipts": tuple(receipts)}
         ext = os.path.splitext(media_path)[1].lower()
         method, _ = _adapter_media_method(ext, (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS)
-        last_result = await getattr(adapter, method)(chat_id, media_path, metadata=metadata)
-        receipts.extend(last_result.receipts)
+        try:
+            last_result = await getattr(adapter, method)(chat_id, media_path, metadata=metadata)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return {**_error(f"Matrix media send failed: {exc}"), "receipts": tuple(receipts)}
+        receipts.extend(getattr(last_result, "receipts", ()))
         if not last_result.success:
             return {**_error(f"Matrix media send failed: {last_result.error}"), "receipts": tuple(receipts)}
     return ({"error": _NO_DELIVERABLE} if last_result is None

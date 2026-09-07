@@ -258,6 +258,10 @@ def _public_cron_string_list(value: Any) -> List[str]:
     return [item for item in value if type(item) is str and 0 < len(item) <= 256]
 
 
+_PUBLIC_CRON_JOB_STATES = frozenset({"scheduled", "paused", "completed", "error"})
+_PUBLIC_CRON_LAST_STATUSES = frozenset({"ok", "error", "delivery_failed", "blocked_config", "interrupted"})
+
+
 def _public_cron_job(job: Any) -> Dict[str, Any]:
     """Bounded dashboard summary; execution/configuration detail stays private."""
     if type(job) is not dict:
@@ -286,8 +290,8 @@ def _public_cron_job(job: Any) -> Dict[str, Any]:
             if type((value := (job.get("repeat") or {}).get(key))) is int and value >= 0
         } if type(job.get("repeat")) is dict else None,
         "enabled": job.get("enabled") if type(job.get("enabled")) is bool else False,
-        "state": state if type(state) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", state) else None,
-        "last_status": last_status if type(last_status) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", last_status) else None,
+        "state": state if type(state) is str and state in _PUBLIC_CRON_JOB_STATES else None,
+        "last_status": last_status if type(last_status) is str and last_status in _PUBLIC_CRON_LAST_STATUSES else None,
         "last_run_at": _public_cron_timestamp(job.get("last_run_at")),
         "next_run_at": _public_cron_timestamp(job.get("next_run_at")),
         "last_error": "run_failed" if job.get("last_error") is not None else None,

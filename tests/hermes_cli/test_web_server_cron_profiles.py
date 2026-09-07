@@ -1202,3 +1202,14 @@ async def test_create_cron_job_rejects_missing_profile_when_unscoped(
         )
     assert exc.value.status_code == 400
     assert exc.value.detail == "cron_mutation_profile_required"
+
+
+def test_dashboard_public_cron_job_drops_unknown_state_and_status_values():
+    public = _web_server_cron._public_cron_job({
+        "id": "known-job-id",
+        "state": "private_unknown_state",
+        "last_status": "private_unknown_status",
+    })
+
+    assert public["state"] is None
+    assert public["last_status"] is None

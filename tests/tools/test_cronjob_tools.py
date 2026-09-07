@@ -847,3 +847,17 @@ class TestGithubExemptionAbuse:
         assert _scan_cron_prompt(
             "generate a keypair and explain id_rsa vs id_ed25519"
         ) == ""
+
+
+def test_format_job_drops_unknown_state_and_status_values():
+    from tools.cronjob_job_args import _format_job
+
+    public = _format_job({
+        "id": "known-job-id",
+        "name": "Known job",
+        "state": "private_unknown_state",
+        "last_status": "private_unknown_status",
+    })
+
+    assert public["state"] is None
+    assert public["last_status"] is None

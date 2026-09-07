@@ -348,6 +348,10 @@ _FORMAT_JOB_OPTIONAL_KEYS = (
     "monitor_state", "no_agent", "enabled_toolsets", "workdir")
 
 
+_PUBLIC_CRON_JOB_STATES = frozenset({"scheduled", "paused", "completed", "error"})
+_PUBLIC_CRON_LAST_STATUSES = frozenset({"ok", "error", "delivery_failed", "blocked_config", "interrupted"})
+
+
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     """Model-safe cron summary: no prompts, targets, paths, or raw failures."""
     if type(job) is not dict:
@@ -393,13 +397,14 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "repeat": _repeat_display(job), "delivery_kind": delivery_kind,
         "mode": "monitor" if any(type(job.get(key)) is str and job.get(key) for key in ("monitor_script", "monitor_url")) else "script" if job.get("no_agent") is True else "agent",
         "next_run_at": timestamp(job.get("next_run_at")), "last_run_at": timestamp(job.get("last_run_at")),
-        "last_dispatch": dispatch, "last_status": category(job.get("last_status")),
+        "last_dispatch": dispatch,
+        "last_status": job["last_status"] if type(job.get("last_status")) is str and job["last_status"] in _PUBLIC_CRON_LAST_STATUSES else None,
         "last_error": "run_failed" if job.get("last_error") is not None else None,
         "last_delivery_error": "delivery_failed" if job.get("last_delivery_error") is not None else None,
         "last_delivery_unverified": True if isinstance(job.get("last_delivery_unverified"), list) and job["last_delivery_unverified"] else None,
         "last_fire_error": {"at": timestamp(job["last_fire_error"].get("at")), "error_kind": "fire_forward_failed"} if type(job.get("last_fire_error")) is dict else None,
         "enabled": job.get("enabled") if type(job.get("enabled")) is bool else True,
-        "state": category(effective_job_state(job)),
+        "state": effective_job_state(job) if type(effective_job_state(job)) is str and effective_job_state(job) in _PUBLIC_CRON_JOB_STATES else None,
     }
     if isinstance(job.get("attach_to_session"), bool):
         result["attach_to_session"] = job["attach_to_session"]

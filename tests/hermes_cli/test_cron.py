@@ -722,3 +722,32 @@ class TestSlashCronListLastStatus:
 
         out = self._run_list(tmp_cron_dir, capsys)
         assert "(ok)" in out
+
+
+def test_cron_runs_hides_execution_identity_and_unbounded_metadata(monkeypatch, capsys):
+    private_values = {
+        "id": "PRIVATE_EXECUTION_ID_SENTINEL",
+        "source": "PRIVATE_SOURCE_SENTINEL",
+        "claimed_at": "PRIVATE_TIMESTAMP_SENTINEL",
+        "error_kind": "PRIVATE_ERROR_SENTINEL",
+    }
+    monkeypatch.setattr(
+        "cron.executions.list_executions",
+        lambda **_kwargs: [{
+            "job_id": "known-job-id",
+            "status": "PRIVATE_STATUS_SENTINEL",
+            **private_values,
+        }],
+    )
+    monkeypatch.setattr(
+        "cron.executions.receipt_summary",
+        lambda _execution_id: {"delivered": 1, "failed": 0, "unknown": 0, "targets_delivered": 1},
+    )
+
+    cron_cli.cron_runs()
+
+    out = capsys.readouterr().out
+    assert "known-job-id" in out
+    for private_value in private_values.values():
+        assert private_value not in out
+    assert "PRIVATE_STATUS_SENTINEL" not in out
