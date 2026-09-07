@@ -410,6 +410,31 @@ def test_run_one_job_reports_silent_delivery_suppression(monkeypatch):
     assert delivery_result == {"delivery_outcome": "suppressed"}
 
 
+def test_run_one_job_reports_crash_delivery_outcome_to_collector(monkeypatch):
+    """The crash-notice seam must preserve the typed outcome for manual runs."""
+    import cron.scheduler as scheduler
+
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    monkeypatch.setattr(scheduler, "finish_execution", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
+    monkeypatch.setattr(
+        scheduler,
+        "run_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("run crashed")),
+    )
+    monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler, "_upsert_incident_for_failure", lambda *_args, **_kwargs: (False, None))
+
+    delivery_result = {}
+    assert scheduler.run_one_job(
+        {"id": "job-crash", "execution_id": "exec-crash", "deliver": "matrix:room"},
+        delivery_result=delivery_result,
+    ) is False
+
+    assert delivery_result == {"delivery_outcome": "delivered"}
+
+
 def test_provider_start_recovers_interrupted_records_before_tick(monkeypatch):
     import cron.scheduler_provider as provider
 
