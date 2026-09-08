@@ -179,7 +179,9 @@ def test_digest_registration_pins_self_context_to_the_actual_job_id(
     assert record["sources"][0]["output_path"] == str(summarized)
 
 
-def test_digest_registration_excludes_sources_not_used_in_context(tmp_path, monkeypatch):
+def test_digest_registration_excludes_sources_not_used_in_context(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from cron.digest_reactions import resolve_digest_delivery
@@ -253,7 +255,9 @@ def test_source_reader_never_requests_an_unbounded_read(tmp_path, monkeypatch):
 
     source = tmp_path / "cron" / "output" / "source-job" / "detail.md"
     source.parent.mkdir(parents=True)
-    source.write_text("## Prompt\nprivate\n\n## Response\nsafe detail", encoding="utf-8")
+    source.write_text(
+        "## Prompt\nprivate\n\n## Response\nsafe detail", encoding="utf-8"
+    )
     real_fdopen = digest_reactions.os.fdopen
 
     class BoundedHandle:
@@ -321,6 +325,30 @@ def test_source_reader_fails_closed_after_bounded_scan(tmp_path, monkeypatch):
 
     assert "detail output is no longer available" in text
     assert "late detail" not in text
+
+
+def test_source_reader_rejects_prompt_response_when_scan_is_incomplete(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron import digest_reactions
+
+    monkeypatch.setattr(digest_reactions, "_MAX_ARTIFACT_SCAN_CHARS", 128)
+    source = tmp_path / "cron" / "output" / "source-job" / "detail.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "## Prompt\nQuoted example:\n## Response\nPRIVATE PROMPT CONTENT\n"
+        + "x" * 256
+        + "\n## Response\nActual saved response\n",
+        encoding="utf-8",
+    )
+    record = {"sources": [{"name": "Source Job", "output_path": str(source)}]}
+
+    text = digest_reactions.format_digest_detail_response(record)
+
+    assert "PRIVATE PROMPT CONTENT" not in text
+    assert "detail output is no longer available" in text
 
 
 def test_response_scanner_never_reads_past_its_total_budget():
@@ -688,7 +716,10 @@ def test_deliver_result_registers_standalone_matrix_digest_with_output_file(
 
     with (
         patch("gateway.config.load_gateway_config", return_value=config),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch(
+            "cron.scheduler.load_config",
+            return_value={"cron": {"wrap_response": False}},
+        ),
         patch("tools.send_message_tool._send_to_platform", new=send),
     ):
         error = _deliver_result(job, "digest", output_file=digest_output)
@@ -745,7 +776,10 @@ def test_deliver_result_registers_live_matrix_digest_with_output_file(
 
     with (
         patch("gateway.config.load_gateway_config", return_value=config),
-        patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+        patch(
+            "cron.scheduler.load_config",
+            return_value={"cron": {"wrap_response": False}},
+        ),
         patch("asyncio.run_coroutine_threadsafe", side_effect=run_coro),
         patch("tools.send_message_tool._send_to_platform", new=standalone_send),
     ):

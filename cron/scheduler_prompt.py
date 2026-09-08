@@ -93,14 +93,26 @@ def _inject_context_from(job: dict, prompt: str) -> tuple[str, bool]:
                 (output_dir / source_job_id).glob("*.md"), key=lambda f: f.stat().st_mtime,
                 reverse=True,
             )
-            if not output_files:
-                continue  # silent skip — no output yet
-            source_output = output_files[0]
-            latest_output = source_output.read_text(encoding="utf-8").strip()
+            latest_output = ""
+            source_output = None
+            for output_file in output_files:
+                candidate = output_file.read_text(encoding="utf-8").strip()
+                # Only the run header describes suppression; script/agent payloads can
+                # quote these markers. Keep error documents useful for recovery context.
+                header = candidate.split("\n---\n", 1)[0].split("\n## Prompt", 1)[0]
+                silent_audit = candidate.startswith("# Cron Job:") and any(
+                    line.startswith(("**Status:** no_change", "**Status:** silent",
+                                     "Script gate returned `wakeAgent=false`"))
+                    for line in header.splitlines()
+                )
+                if candidate and not silent_audit:
+                    latest_output = candidate
+                    source_output = output_file
+                    break
             if len(latest_output) > _MAX_CONTEXT_CHARS:
                 latest_output = (
                     latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]")
-            if not latest_output:
+            if not latest_output or source_output is None:
                 continue  # silent skip — empty output
             if is_self:
                 prompt = _prepend_context_block(

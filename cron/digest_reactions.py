@@ -222,12 +222,9 @@ def register_digest_delivery(
     event_id = str(event_id or "").strip()
     sources = normalize_context_from(list(source_job_ids or []))
     digest_job_id = str(digest_job.get("id") or "").strip()
-    sources = normalize_context_from(
-        [
-            digest_job_id if source.lower() == "self" else source
-            for source in sources
-        ]
-    )
+    sources = normalize_context_from([
+        digest_job_id if source.lower() == "self" else source for source in sources
+    ])
     if source_output_paths is not None:
         sources = [job_id for job_id in sources if job_id in source_output_paths]
     if not room_id or not event_id or not sources:
@@ -341,7 +338,9 @@ def _read_response_section_bounded(handle) -> str:
     while True:
         remaining_scan = _MAX_ARTIFACT_SCAN_CHARS - scanned_chars
         if remaining_scan <= 0:
-            break
+            # A later response section may supersede a heading quoted in the
+            # prompt. Without reaching EOF, no candidate is safe to disclose.
+            return ""
         piece = handle.readline(min(_READ_CHUNK_CHARS, remaining_scan))
         if not piece:
             break
