@@ -93,6 +93,39 @@ def test_prompt_embedded_response_heading_does_not_leak_prompt_content(
     assert "PRIVATE PROMPT DATA" not in text
 
 
+@pytest.mark.parametrize(
+    "error_text", ["source failed", "source failed\n## Response\nPRIVATE ERROR DATA"]
+)
+def test_failed_source_artifact_does_not_disclose_prompt_or_error(
+    tmp_path, monkeypatch, error_text
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from cron.digest_reactions import format_digest_detail_response
+    from cron.scheduler import _run_doc_header
+    from cron.scheduler_diagnostics import format_run_error
+
+    source = tmp_path / "cron" / "output" / "source-job" / "failed.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        _run_doc_header(
+            {"id": "source-job"},
+            "Source Job (FAILED)",
+            "source-job",
+            "Quoted example:\n## Response\nPRIVATE PROMPT DATA",
+        )
+        + format_run_error(RuntimeError(error_text)),
+        encoding="utf-8",
+    )
+    record = {"sources": [{"name": "Source Job", "output_path": str(source)}]}
+
+    text = format_digest_detail_response(record)
+
+    assert "PRIVATE PROMPT DATA" not in text
+    assert "PRIVATE ERROR DATA" not in text
+    assert "detail output is no longer available" in text
+
+
 def test_digest_source_selection_tolerates_malformed_sources():
     from cron.digest_reactions import format_digest_source_selection
 

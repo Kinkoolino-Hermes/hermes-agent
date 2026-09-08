@@ -349,6 +349,11 @@ def _read_response_section_bounded(handle) -> str:
         at_line_start = piece.endswith("\n")
         section_line = piece.rstrip("\r\n") if piece_starts_line else ""
 
+        if section_line == "## Error":
+            # Failed runs have no genuine response section. A candidate before
+            # this marker may come from the prompt, and later markers may be
+            # quoted in the diagnostic itself. Treat the artifact as unavailable.
+            return ""
         if section_line == "## Response":
             # The prompt is untrusted and can itself contain section-looking
             # headings. The scheduler appends the real response last, so each
