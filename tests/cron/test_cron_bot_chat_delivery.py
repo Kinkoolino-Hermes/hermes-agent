@@ -117,6 +117,24 @@ def _completed(returncode=0, stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
 
 
+@pytest.mark.parametrize("profile", ["", "research"])
+def test_unowned_bot_chat_scrubs_delegated_worker_authority(monkeypatch, tmp_path, profile):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "worker-only-task")
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    with mock.patch("tools.bot_live_delivery.find_canonical_live_owner", return_value=None), \
+         mock.patch.object(sched_delivery.shutil, "which", return_value="/usr/bin/hermes"), \
+         mock.patch.object(sched_delivery.subprocess, "run", return_value=_completed()) as run:
+        assert _deliver_to_bot_chat({"id": "safe-job"}, "payload", profile) is None
+    child_env = run.call_args.kwargs["env"]
+    assert "HERMES_KANBAN_TASK" not in child_env
+    assert child_env["HERMES_DELEGATED_CHILD_CONTEXT"] == "1"
+    if profile:
+        assert "HERMES_HOME" not in child_env
+    else:
+        assert child_env["HERMES_HOME"] == str(tmp_path)
+
+
 def test_deliver_runs_canonical_bot_chat_lane():
     """The subprocess must use the Bot Mode agent-to-agent chat lane:
     chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file <tmp>."""

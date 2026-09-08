@@ -166,6 +166,7 @@ export interface CronLastResult {
 const CRON_LAST_RESULT_TONE: Record<string, CronLastResultTone> = {
   ok: "success",
   delivery_failed: "warning",
+  delivery_queued: "warning",
   blocked_config: "warning",
   error: "destructive",
 };
@@ -177,6 +178,9 @@ export function cronLastResult(
   if (!status) return null;
   const tone = CRON_LAST_RESULT_TONE[status] ?? "destructive";
   if (status === "ok") return { status, tone, detail: null };
+  if (status === "delivery_queued") {
+    return { status, tone, detail: "Completion unverified; do not resend" };
+  }
   const detail =
     status === "delivery_failed"
       ? asString(job.last_delivery_error).trim() || asString(job.last_error).trim()
