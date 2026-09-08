@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +11,20 @@ import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import SendResult, TransportReceipt, TransportTarget
+
+
+def test_standalone_telegram_planning_does_not_require_optional_sdk(monkeypatch):
+    """Receipt preregistration must use formatting helpers without importing Telegram."""
+    from tools.send_message_senders import _plan_standalone_telegram_text
+
+    monkeypatch.setitem(sys.modules, "telegram", None)
+
+    formatted, chunks, has_html, caption = _plan_standalone_telegram_text("- planned item!")
+
+    assert formatted
+    assert chunks
+    assert has_html is False
+    assert caption is None
 
 
 @pytest.mark.asyncio
@@ -271,6 +286,7 @@ async def test_standalone_telegram_preserves_media_provider_ack(tmp_path):
 
 @pytest.mark.asyncio
 async def test_standalone_media_thread_fallback_records_actual_target(tmp_path):
+    pytest.importorskip("telegram")
     from tools.send_message_senders import _send_telegram
 
     image = tmp_path / "image.jpg"
@@ -291,6 +307,7 @@ async def test_standalone_media_thread_fallback_records_actual_target(tmp_path):
 
 @pytest.mark.asyncio
 async def test_standalone_partial_text_failure_keeps_prior_receipt():
+    pytest.importorskip("telegram")
     from tools.send_message_senders import _send_telegram
 
     sender = AsyncMock(side_effect=[SimpleNamespace(message_id=203), TimeoutError("unknown")])
@@ -308,6 +325,7 @@ async def test_standalone_partial_text_failure_keeps_prior_receipt():
 
 @pytest.mark.asyncio
 async def test_receipt_bound_media_does_not_retry_ambiguous_caption_error(tmp_path):
+    pytest.importorskip("telegram")
     from tools.send_message_senders import _send_telegram
 
     image = tmp_path / "image.jpg"

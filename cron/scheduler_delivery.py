@@ -1093,23 +1093,56 @@ def _bot_chat_query_message(job: dict, content: str) -> str:
 
 
 def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]:
-    """Deliver job output into a profile's canonical Bot Chat as an inbound turn.
+    """Hand output to its live Bot Chat owner, or use the unowned CLI lane.
 
-    Runs ``hermes [-p <profile>] chat --in ~ -c "Bot Chat" --create-if-missing
-    -Q --query-file <tmp>`` — the exact lane Bot Mode agent-to-agent messages
-    use, so the adopt-before-mint canonical-session rules apply and the target
-    bot receives the output as a real user-role message it can act on.
-    Alternation-safe by construction: this is an inbound turn on the chat
-    command lane, not a transcript splice.
-
-    ``profile`` is ``""`` for the job's own profile (subprocess inherits this
-    scheduler's HERMES_HOME) or a validated local profile name.  Returns None
-    on success or an error string for ``last_delivery_error``.
+    Admission is not delivery: queued/claimed results remain unverified and
+    never authorize a CLI replay. ``profile`` is empty for the job's profile.
     """
+    import hashlib
+    import json
     import shutil as _shutil
     import tempfile
+    import uuid
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import get_profile_dir
+    from tools.bot_live_delivery import (
+        deliver_to_live_owner, find_canonical_live_owner, read_delivery_result,
+    )
 
     job_id = job.get("id", "?")
+    message = _bot_chat_query_message(job, content)
+    try:
+        source_home = get_hermes_home().resolve()
+        home = (get_profile_dir(profile) if profile else source_home).resolve()
+        run_id = job.get("execution_id")
+        if not run_id:
+            run_id = job.setdefault("_bot_chat_run_id", uuid.uuid4().hex)
+        key = hashlib.sha256(json.dumps(
+            [str(source_home), job_id, str(run_id), str(home)],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        # Read before discovery: an owner can exit after admission. No receipt
+        # state, including failed/ambiguous, permits a second-writer fallback.
+        receipt = read_delivery_result(home, key)
+        if receipt is None:
+            owner = find_canonical_live_owner(home)
+            if owner is not None:
+                receipt = deliver_to_live_owner(home, owner, message, delivery_id=key)
+        if receipt is not None:
+            if receipt["message"] != message:
+                raise ValueError("delivery id already belongs to a different payload")
+            status = receipt["status"]
+            target = f"bot-chat:{profile or '(own)'}"
+            job.setdefault("_bot_chat_delivery_receipts", {})[target] = {
+                "status": status, "delivery_id": key,
+            }
+            if status == "settled":
+                return None
+            if status in ("queued", "claimed", "ambiguous", "failed"):
+                return f"bot-chat {status}; completion unverified; do not resend"
+            return "bot-chat delivery confirmation unavailable"
+    except Exception:
+        return "bot-chat delivery confirmation unavailable"
 
     hermes_bin = _shutil.which("hermes")
     if hermes_bin:
@@ -1131,10 +1164,8 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
         # -p owns profile resolution in the child; a leftover HERMES_HOME
         # from THIS scheduler's profile must not shadow it.
         env.pop("HERMES_HOME", None)
-
-    # The prefix tells the receiving bot this is scheduled output, not the
-    # human typing. Planning calls the same helper before any side effect.
-    message = _bot_chat_query_message(job, content)
+    else:
+        env["HERMES_HOME"] = str(source_home)
 
     query_file = None
     try:
@@ -1838,12 +1869,19 @@ def _record_delivery_verification(job: dict, unverified_targets: list) -> None:
     fail a delivery.
     """
     new_value = list(unverified_targets) or None
-    if (job.get("last_delivery_unverified") or None) == new_value:
+    queued = {target: receipt for target, receipt in
+              job.get("_bot_chat_delivery_receipts", {}).items()
+              if receipt["status"] in ("queued", "claimed")} or None
+    values = {key: value for key, value in {
+        "last_delivery_unverified": new_value, "last_delivery_queued": queued,
+    }.items() if (job.get(key) or None) != value}
+    if not values:
         return
+    job.update(values)
     try:
         from cron.jobs import update_job
 
-        update_job(job["id"], {"last_delivery_unverified": new_value})
+        update_job(job["id"], values)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug(
             "Job '%s': could not record delivery verification: %s", job.get("id"), exc,
@@ -2489,9 +2527,12 @@ def _deliver_bot_chat_target(job, target, content, attempts, delivery_errors):
     """Deliver bot-chat and persist its only honest outcome (failure or unknown)."""
     from gateway.platforms.base import TransportReceipt, TransportTarget
     chat_id = target["chat_id"]
-    error = _deliver_to_bot_chat(job, content, "" if chat_id == BOT_CHAT_SELF_TARGET else chat_id)
+    profile = "" if chat_id == BOT_CHAT_SELF_TARGET else chat_id
+    error = _deliver_to_bot_chat(job, content, profile)
+    bot_receipt = job.get("_bot_chat_delivery_receipts", {}).get(f"bot-chat:{profile or '(own)'}")
+    queued = bool(bot_receipt and bot_receipt["status"] in ("queued", "claimed"))
     if not attempts:
-        if error:
+        if error and not queued:
             delivery_errors.append(error)
         return
     requested = TransportTarget(BOT_CHAT_PLATFORM, chat_id, target.get("thread_id"))
@@ -2507,6 +2548,10 @@ def _deliver_bot_chat_target(job, target, content, attempts, delivery_errors):
             components={"text"})
     if not persisted:
         delivery_errors.append("bot-chat delivery receipt could not be persisted; delivery is unknown")
+    elif queued:
+        # Durable admission is visible separately; it cannot upgrade a
+        # provider receipt or authorize an automatic resend.
+        return
     elif receipt.outcome == "unknown":
         delivery_errors.append("bot-chat delivery confirmation unavailable")
     else:
@@ -2520,16 +2565,24 @@ def _deliver_result(
     """Orchestrate target planning and the independent live/standalone lanes."""
     if type(job) is not dict or type(content) is not str:
         return "delivery input is invalid; no delivery was sent"
+    job.pop("_bot_chat_delivery_receipts", None)
     try:
         targets = _resolve_delivery_targets(job, for_failure=for_failure)
     except (TypeError, ValueError):
         return "delivery target is invalid; no delivery was sent"
     if not targets:
+        _record_delivery_verification(job, [])
         return _unresolved_delivery_outcome(job, for_failure)
     external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER", "")
-    if external_execution and adapters is None and external_execution == str(job.get("execution_id") or ""):
+    if (external_execution and adapters is None and external_execution == str(job.get("execution_id") or "")
+            and any(target["platform"] != BOT_CHAT_PLATFORM for target in targets)):
         from cron.delivery_queue import enqueue_and_wait
-        return enqueue_and_wait(external_execution, job, content, for_failure=for_failure)
+        _record_delivery_verification(job, [])
+        error = enqueue_and_wait(external_execution, job, content, for_failure=for_failure)
+        from cron.jobs import get_job
+        refreshed = get_job(job["id"]) or {}
+        job["last_delivery_queued"] = refreshed.get("last_delivery_queued")
+        return error
     from gateway.config import load_gateway_config
     from gateway.platforms.base import BasePlatformAdapter
     wrap_response, user_cfg = True, None

@@ -229,16 +229,19 @@ async def _telegram_send_one_media(bot, chat_id, media_path, is_voice, *, captio
 
 
 def _telegram_format(message):
-    """``(formatted, parse_mode, has_html)``: text already containing HTML tags is sent as
-    HTML; otherwise Markdown -> MarkdownV2 via the adapter's ``format_message``."""
-    from telegram.constants import ParseMode
+    """``(formatted, parse_mode, has_html)`` using the adapter's formatter when available.
+
+    Planning must remain dependency-free: the optional Telegram SDK is needed only
+    when constructing the bot in the actual send path, not to choose Bot API's
+    documented string parse-mode values.
+    """
     if re.search(r'<[a-zA-Z/][^>]*>', message):
-        return message, ParseMode.HTML, True
+        return message, "HTML", True
     try:
         from plugins.platforms.telegram.adapter import TelegramAdapter
-        return TelegramAdapter.__new__(TelegramAdapter).format_message(message), ParseMode.MARKDOWN_V2, False
+        return TelegramAdapter.__new__(TelegramAdapter).format_message(message), "MarkdownV2", False
     except Exception:
-        return message, ParseMode.MARKDOWN_V2, False  # formatting unavailable: send as-is
+        return message, "MarkdownV2", False  # formatting unavailable: send as-is
 
 
 def _plan_standalone_telegram_text(message: str, media_files=None) -> tuple[str, list[str], bool, str | None]:

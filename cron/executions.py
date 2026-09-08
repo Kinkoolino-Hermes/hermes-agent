@@ -179,6 +179,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
            ON CONFLICT(singleton) DO UPDATE SET version=excluded.version""",
         (_RECEIPT_SCHEMA_VERSION,),
     )
+    add_column_if_missing(conn, "executions", "delivery_outcome", "delivery_outcome TEXT")
     add_column_if_missing(conn, "executions", "scheduled_instant", "scheduled_instant TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_executions_occurrence "
@@ -790,14 +791,21 @@ def finish_execution(
     category = None if success else (error_kind or "execution_failed")
     if category is not None and category not in _EXECUTION_ERROR_KINDS:
         raise ValueError("execution error_kind is invalid")
+    if delivery_outcome is not None and (
+        type(delivery_outcome) is not str or delivery_outcome not in {
+            "queued", "delivered", "failed", "unknown", "suppressed",
+            "suppressed_acked", "not_configured",
+        }
+    ):
+        raise ValueError("execution delivery_outcome is invalid")
     with _transaction() as conn:
         cur = conn.execute(
             """UPDATE executions
                SET status=?, finished_at=?, error=NULL, error_kind=?, handoff_pending=0,
-                   handoff_started_at=NULL
+                   handoff_started_at=NULL, delivery_outcome=?
                WHERE id=? AND status IN ('claimed','running')
                  AND process_id=? AND pid=?""",
-            (status, now, category, execution_id, _PROCESS_ID, os.getpid()),
+            (status, now, category, delivery_outcome, execution_id, _PROCESS_ID, os.getpid()),
         )
         if cur.rowcount != 1:
             return None

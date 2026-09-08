@@ -259,7 +259,7 @@ def _public_cron_string_list(value: Any) -> List[str]:
 
 
 _PUBLIC_CRON_JOB_STATES = frozenset({"scheduled", "paused", "completed", "error"})
-_PUBLIC_CRON_LAST_STATUSES = frozenset({"ok", "error", "delivery_failed", "blocked_config", "interrupted"})
+_PUBLIC_CRON_LAST_STATUSES = frozenset({"ok", "error", "delivery_failed", "delivery_queued", "blocked_config", "interrupted"})
 
 
 def _public_cron_job(job: Any) -> Dict[str, Any]:

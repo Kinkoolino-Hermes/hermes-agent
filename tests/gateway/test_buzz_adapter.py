@@ -3124,6 +3124,7 @@ class TestInboundMediaAuthorizationGate:
             "success": True,
             "message_id": "evt-second",
             "media_delivered": True,
+            "receipts": (),
         }
         assert len(cli.calls) == 3
         assert cli.calls[0][1] == "attached files"

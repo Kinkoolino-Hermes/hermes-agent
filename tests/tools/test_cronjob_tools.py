@@ -849,15 +849,21 @@ class TestGithubExemptionAbuse:
         ) == ""
 
 
-def test_format_job_drops_unknown_state_and_status_values():
+def test_format_job_allows_known_status_and_drops_unknown_values():
     from tools.cronjob_job_args import _format_job
 
-    public = _format_job({
+    known_public = _format_job({
+        "id": "known-job-id",
+        "name": "Known job",
+        "last_status": "delivery_queued",
+    })
+    unknown_public = _format_job({
         "id": "known-job-id",
         "name": "Known job",
         "state": "private_unknown_state",
         "last_status": "private_unknown_status",
     })
 
-    assert public["state"] is None
-    assert public["last_status"] is None
+    assert known_public["last_status"] == "delivery_queued"
+    assert unknown_public["state"] is None
+    assert unknown_public["last_status"] is None
