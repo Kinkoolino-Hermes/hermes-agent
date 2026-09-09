@@ -383,6 +383,7 @@ def _manual_run_delivery_line(deliver: Any, outcome: Any) -> str:
         return prefix + " (output saved locally only)"
     suffixes = {
         "delivered": "delivery confirmed by the scheduler",
+        "queued": "output queued for delivery; completion unverified, do not resend",
         "suppressed": "scheduler recorded delivery as suppressed",
         "suppressed_acked": (
             "operator acknowledged the incident; failure alert was suppressed"

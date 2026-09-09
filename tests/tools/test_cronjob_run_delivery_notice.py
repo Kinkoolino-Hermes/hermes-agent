@@ -233,6 +233,29 @@ def test_completion_uses_scheduler_effective_delivery_lane(
         assert delivery.call_args.kwargs["for_failure"] is True
 
 
+@pytest.mark.parametrize("target", ["bot-chat:main", "matrix:room"])
+def test_queued_completion_preserves_pending_delivery_warning(monkeypatch, target):
+    from cron.scheduler import _classify_delivery_outcome
+    from tools import cronjob_tools
+
+    outcome = _classify_delivery_outcome(
+        delivery_error=None, should_deliver=True, unresolved_origin=False,
+        normalized_deliver=target, incident_acked=False, success=True,
+        delivery_queued=target,
+    )
+    monkeypatch.setattr(cronjob_tools, "get_job", lambda _id: {})
+    monkeypatch.setattr(cronjob_tools, "_latest_job_output_excerpt", lambda _id: None)
+    completion = cronjob_tools._manual_run_completion(
+        {"success": True, "delivery_outcome": outcome, "delivery_target": target},
+        "queued-run", "queued run", target, time.time(),
+    )
+    summary = completion["summary"]
+    assert "output queued" in summary
+    assert "completion unverified, do not resend" in summary
+    assert "delivery confirmed" not in summary
+    assert "outcome was not reported" not in summary
+
+
 class TestRunnerSummaryWiring:
     """The completion event must use the exact scheduler delivery outcome
     together with the refreshed run error record."""
