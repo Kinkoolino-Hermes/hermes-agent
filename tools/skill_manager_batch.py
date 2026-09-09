@@ -176,7 +176,7 @@ def _skill_manage_batch(
     if len(operations) == 1:
         op = operations[0]
         with _smt._pending_target_anchor_context(names[0], op.get("category")):
-            return _smt._skill_manage_unlocked(
+            raw = _smt._skill_manage_unlocked(
                 action=op["action"],
                 name=names[0],
                 content=op.get("content"),
@@ -190,6 +190,17 @@ def _skill_manage_batch(
                 session_id=session_id,
                 tool_call_id=tool_call_id,
             )
+
+        # Preserve flat-path details, but retain the operations[] result contract
+        # for consumers such as applied-write notifications. Staging is not apply.
+        parsed = json.loads(raw)
+        if parsed.get("success") is True and not parsed.get("staged"):
+            parsed.update(operations_applied=1, results=[{
+                "name": names[0], "action": op["action"],
+                "file_path": op.get("file_path"), "success": True,
+            }])
+            return json.dumps(parsed, ensure_ascii=False)
+        return raw
 
     if not _smt._skill_gate_bypass.get():
         try:

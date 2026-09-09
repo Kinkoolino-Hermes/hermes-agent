@@ -212,6 +212,23 @@ class TestSkillManageBatch(unittest.TestCase):
         content = open(skill_md).read()
         self.assertIn("Step ONE.", content)
 
+    def test_single_operation_reports_applied_result_without_losing_details(self):
+        r = self._call("probe", [{"action": "create", "content": SK.format(n="probe")}])
+        self.assertTrue(r["success"], r)
+        self.assertEqual(r["operations_applied"], 1)
+        self.assertEqual(r["results"], [
+            {"name": "probe", "action": "create", "file_path": None, "success": True},
+        ])
+        self.assertIn("message", r)
+
+    def test_failed_single_operation_never_reports_applied_result(self):
+        r = self._call("missing", [{
+            "action": "patch", "old_string": "before", "new_string": "after",
+        }])
+        self.assertFalse(r["success"], r)
+        self.assertNotIn("operations_applied", r)
+        self.assertNotIn("results", r)
+
     def test_single_op_path_unchanged(self):
         self._call("probe", [{"action": "create", "content": SK.format(n="probe")}])
         raw = self.smt.skill_manage(
@@ -282,6 +299,8 @@ class TestSkillManageBatch(unittest.TestCase):
             ])
 
         self.assertTrue(r.get("staged"), r)
+        self.assertNotIn("operations_applied", r)
+        self.assertNotIn("results", r)
         self.assertEqual(staged["payload"]["action"], "create")
         self.assertEqual(staged["payload"]["name"], "probe")
         self.assertNotIn("operations", staged["payload"])
