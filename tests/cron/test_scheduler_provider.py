@@ -639,6 +639,9 @@ def test_fire_due_forwards_manual_force_to_store_claim(monkeypatch):
         ("bind", "exec-force", expected),
         ("run", expected),
     ]
+    # Off-tick run-now must not consume the next scheduled occurrence.
+    assert InProcessCronScheduler().fire_due("j1", manual=True) is True
+    assert claims[-1] == ("j1", {"manual": True, "return_job": True})
 
 
 def test_force_claim_without_immutable_timestamp_fails_before_dispatch(monkeypatch):
