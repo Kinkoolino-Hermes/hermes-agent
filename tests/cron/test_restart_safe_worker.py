@@ -478,6 +478,7 @@ def test_managed_gateway_restart_preserves_active_worker_and_single_side_effect(
     import cron.scheduler as scheduler
     from cron.jobs import create_job, use_cron_store
     from gateway.config import Platform, PlatformConfig
+    from gateway.platforms.base import SendResult, TransportReceipt, TransportTarget
     from gateway.status import _pid_exists
     from tools import process_registry
 
@@ -522,11 +523,19 @@ def test_managed_gateway_restart_preserves_active_worker_and_single_side_effect(
     payload.write_text(json.dumps(job), encoding="utf-8")
 
     sent = []
-    adapter = Mock()
+    adapter = Mock(spec=["send"])
 
     async def send(_chat_id, content, metadata=None):
         sent.append((content, metadata))
-        return {"success": True, "message_id": "restart-delivery-1"}
+        target = TransportTarget("telegram", str(_chat_id))
+        return SendResult(
+            success=True,
+            message_id="restart-delivery-1",
+            receipts=(TransportReceipt(
+                outcome="delivered", provider_message_id="restart-delivery-1",
+                requested_target=target, actual_target=target, component="text", ordinal=0,
+            ),),
+        )
 
     adapter.send = send
     gateway_config = Mock()
