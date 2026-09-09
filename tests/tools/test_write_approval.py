@@ -81,6 +81,60 @@ def test_memory_gate_off_allows_write(hermes_home):
     assert wa.pending_count("memory") == 0
 
 
+@pytest.mark.linux_only
+@pytest.mark.parametrize("action", ["remove", "replace", "batch"])
+def test_unattended_memory_proposal_binds_dispatch_provenance(hermes_home, action):
+    """The upstream consolidation gate must stage v2 records, not silently deny."""
+    from types import SimpleNamespace
+    from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from tools.memory_tool import MemoryStore
+    from tools.skill_provenance import set_current_write_origin, reset_current_write_origin
+    from tools import write_approval as wa
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+
+    store = MemoryStore()
+    store.load_from_disk()
+    assert store.add("memory", "standing rule")["success"]
+    before = store._path_for("memory").read_bytes()
+    args = {"action": action, "old_text": "standing rule"}
+    if action == "replace":
+        args["content"] = "replacement rule"
+    elif action == "batch":
+        args = {"operations": [
+            {"action": "remove", "old_text": "standing rule"},
+            {"action": "add", "content": "replacement rule"},
+        ]}
+    # Dispatch identity must come from the agent/context, never model arguments.
+    args.update(session_id="spoofed-session", tool_call_id="spoofed-call")
+    agent = SimpleNamespace(
+        _memory_store=store, _memory_manager=None, session_id="review-session",
+    )
+    tokens = set_session_vars(source="cli", profile="default")
+    origin = set_current_write_origin("background_review")
+    try:
+        result = json.loads(INLINE_TOOL_EXECUTORS["memory"](
+            agent, args, InlineToolContext("review-task", tool_call_id="review-call"),
+        ))
+    finally:
+        reset_current_write_origin(origin)
+        clear_session_vars(tokens)
+
+    assert result.get("proposal_staged") is True, result
+    assert store._path_for("memory").read_bytes() == before
+    record = wa.get_pending(wa.MEMORY, result["pending_id"])
+    assert record["origin"] == "background_review"
+    assert record["session_context"] == {
+        "profile": "default", "surface": "cli",
+        "session_id": "review-session", "tool_call_id": "review-call",
+    }
+    assert handle_pending_subcommand(
+        wa.MEMORY, ["approve", record["id"]], memory_store=store,
+    ) == "Approved 1 memory write(s)."
+    assert store.memory_entries == ([] if action == "remove" else ["replacement rule"])
+    assert wa.pending_count(wa.MEMORY) == 0
+
+
 def test_cli_memory_approve_without_live_agent_uses_fresh_store(hermes_home, capsys):
     """#46783: ``/memory approve`` from a context with no live agent (e.g. the
     Desktop GUI) passed ``memory_store=None`` into the shared handler, which
