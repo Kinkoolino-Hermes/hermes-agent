@@ -2408,7 +2408,7 @@ def save_config_value(key_path: str, value: any) -> bool:
             os.chmod(config_path, 0o600)
         except (OSError, NotImplementedError):
             pass
-        # Same fail-closed cron drift warning as `hermes config set` for every model switch.
+        # Same unpinned-cron notice as `hermes config set` for every model switch.
         from hermes_cli.config import warn_unpinned_cron_jobs_after_model_config_change
 
         warn_unpinned_cron_jobs_after_model_config_change(key_path, value)
@@ -2619,7 +2619,8 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
         # Streaming display state
         self._stream_buf = ""  # partial line buffer
         self._reasoning_preview_buf = ""  # coalesces tiny reasoning chunks
-        self._stream_started = self._stream_box_opened = False
+        self._stream_started = self._stream_box_opened = self._stream_box_live = False
+        self._held_status_lines: list[str] = []  # agent status lines parked while a box streams
         # Possible markdown-table lines held until the block ends for wcwidth-aware re-padding.
         self._stream_table_buf: list[str] = []
         self._in_stream_table = False
@@ -4054,9 +4055,17 @@ def _sync_cli_session_id_from_agent(cli) -> None:
 
 
 def _run_quiet_single_query(cli, effective_query):
-    """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code."""
+    """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code.
+    HERMES_TURN_AUTHOR (set only by a bot-to-bot dispatcher) is consumed here so tool subprocesses do not inherit it."""
+    from agent.interrupt_compat import _accepts_keyword
+    from agent.turn_author import take_turn_author_from_env
+
+    author = take_turn_author_from_env()
+    author_kwargs = {"turn_author": author} if author is not None and _accepts_keyword(cli.agent.run_conversation, "turn_author") else {}
     try:
-        result = cli.agent.run_conversation(user_message=effective_query, conversation_history=cli.conversation_history)
+        result = cli.agent.run_conversation(
+            user_message=effective_query, conversation_history=cli.conversation_history, **author_kwargs,
+        )
     except KeyboardInterrupt:
         _emit_interrupted_session_end(cli, reason="keyboard_interrupt")
         print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
