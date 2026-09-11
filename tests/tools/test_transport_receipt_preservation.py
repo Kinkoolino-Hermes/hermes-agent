@@ -156,6 +156,33 @@ async def test_standalone_telegram_text_ack_uses_inert_provider_id_normalization
 
 
 @pytest.mark.asyncio
+async def test_receipt_bound_standalone_telegram_skips_rich_notification_for_typed_ack():
+    """Cron delivery must use the planned text path, not an opaque rich response."""
+    pytest.importorskip("telegram")
+    from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: F401
+    from tools import wisdom_notifications  # noqa: F401
+    from tools.send_message_senders import _send_telegram
+
+    rich_sender = AsyncMock(return_value={"success": True, "message_id": "rich-opaque"})
+    text_sender = AsyncMock(return_value=SimpleNamespace(message_id=104))
+    with (
+        patch("telegram.Bot", return_value=object()),
+        patch("plugins.platforms.telegram.adapter.TelegramAdapter.format_message", return_value="formatted"),
+        patch("tools.wisdom_notifications.try_telegram_rich_notification", new=rich_sender),
+        patch("tools.send_message_senders._send_telegram_message_with_retry", new=text_sender),
+    ):
+        result = await _send_telegram(
+            "test-token", "-100123", "report", receipt_bound=True,
+            rich_message_html="<b>report</b>",
+        )
+
+    assert result.get("success") is True, result
+    rich_sender.assert_not_awaited()
+    text_sender.assert_awaited_once()
+    assert result["receipts"][0].provider_message_id == "104"
+
+
+@pytest.mark.asyncio
 async def test_standalone_telegram_invalid_text_ack_is_unknown_without_magic():
     pytest.importorskip("telegram")
     from tools.send_message_tool import _send_telegram

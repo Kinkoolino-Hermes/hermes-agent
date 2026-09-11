@@ -159,28 +159,14 @@ def _cron_mirror_delivery_enabled(job: dict, cfg: Optional[dict] = None) -> bool
 
 def _target_matches_origin(origin: dict, platform_name: str, chat_id: str,
                            thread_id: Optional[str]) -> bool:
-    """True when a delivery target is the job's own origin conversation.
-
-    Mirroring is scoped to the origin session by design (see
-    ``_maybe_mirror_cron_delivery``). A job created from a live gateway chat
-    stamps that chat as ``origin`` (``cronjob_tools._origin_from_env``), and
-    that session is guaranteed to exist — it is the very conversation the user
-    was in when they scheduled the job. Fan-out targets (``deliver=all``,
-    explicit ``platform:chat_id`` to some *other* chat, or a home-channel
-    fallback for an origin-less API/script job) are deliberately NOT mirrored:
-    they are broadcasts, not a continuation of a conversation, and may point at
-    a chat the user never opened an agent session in.
-
-    This makes the historical "cold-start" worry a non-case: when the mirror
-    semantically applies (target == origin) the session always exists; when no
-    session exists, the target was never the origin conversation, so we simply
-    do not mirror.
-    """
-    if not origin:
-        return False
-    if str(origin.get("platform", "")).lower() != str(platform_name).lower():
-        return False
-    if str(origin.get("chat_id", "")) != str(chat_id):
+    """True when a delivery target is the job's own origin conversation. A pinned origin
+    thread_id must match — a target without it is a different lane. Mirror eligibility for
+    non-origin targets is decided by ``_target_mirror_eligible``."""
+    if (
+        not origin
+        or str(origin.get("platform", "")).lower() != str(platform_name).lower()
+        or str(origin.get("chat_id", "")) != str(chat_id)
+    ):
         return False
     # thread_id must match when the origin pins one (topic-scoped chats); a
     # target that lost the thread_id is not the same conversation lane.
@@ -190,52 +176,21 @@ def _target_matches_origin(origin: dict, platform_name: str, chat_id: str,
     return True
 
 
-# Resolution-provenance ranking for the dedup OR-merge in
-# _resolve_delivery_targets: higher rank = stronger mirror claim. Broadcast
-# expansions rank 0 so "origin,all"/"all,origin" hitting the same chat keeps
-# the origin(-fallback) tag regardless of token order.
-_MIRROR_PROVENANCE_RANK = {
-    "origin": 3,
-    "origin_fallback": 2,
-    "explicit": 1,
-}
+# Provenance rank for the dedup OR-merge in _resolve_delivery_targets (higher = stronger mirror
+# claim). Broadcasts rank 0 so "origin,all"/"all,origin" keep the origin tag regardless of order.
+_MIRROR_PROVENANCE_RANK = {"origin": 3, "origin_fallback": 2, "home": 2, "explicit": 1}
 
 
 def _target_mirror_eligible(
-    job: dict,
-    target: dict,
-    *,
-    global_mirror: bool,
-    origin_match: Optional[bool] = None,
-) -> bool:
-    """Whether a resolved delivery target may receive the transcript mirror.
-
-    The June origin-scoping refactor gated mirroring on target == origin,
-    which correctly excluded broadcasts but also silenced two legitimate
-    conversation shapes — both hit by script-provisioned ("managed") crons,
-    which never capture an origin (``_origin_from_env`` only fires for jobs
-    created from a live gateway chat):
-
-    - ``origin_fallback``: ``deliver=origin`` with no captured origin resolves
-      to the home channel — the user's primary conversation standing in for
-      the origin, not a broadcast. Eligible under the same flags as a true
-      origin target. (Field report 2026-08-17: brief delivered to the Slack
-      DM, mirror silently skipped, reply hit a context-less session.)
-    - ``explicit``: a ``platform:chat_id`` target is eligible ONLY when the
-      job itself opts in via ``attach_to_session: true`` — the job author
-      declaring this target a conversation (managed per-user DM briefings).
-      The global ``cron.mirror_delivery`` flag never activates explicit
-      targets: it must not start writing transcript entries into arbitrary
-      explicitly-addressed chats (shared channels, other users' DMs).
-
-    Broadcast expansions (``all``, bare-platform home targets) carry no
-    provenance tag and are never eligible — unchanged invariant.
-
-    ``origin_match`` lets the caller pass a precomputed
-    ``_target_matches_origin`` result (``_deliver_result`` already computes it
-    for the same target); when ``None`` it is computed here so tests and
-    future callers stay self-contained.
-    """
+    job: dict, target: dict, *, global_mirror: bool, origin_match: Optional[bool] = None) -> bool:
+    """Whether a resolved delivery target may receive the transcript mirror. Origin targets:
+    always. ``origin_fallback`` (deliver=origin with no captured origin → home channel, standing
+    in for the primary conversation) and ``home`` (user-written bare-platform token, e.g.
+    ``deliver: slack`` — deliberately addresses that platform's home channel): same flags as a
+    true origin. ``explicit`` ``platform:chat_id``: ONLY with per-job ``attach_to_session: true``
+    — the global flag must never write transcripts into arbitrary explicitly-addressed chats.
+    Untagged broadcast expansions (``all``) are never eligible. ``origin_match`` may be
+    precomputed."""
     if origin_match is None:
         origin = _resolve_origin(job) or {}
         origin_match = _target_matches_origin(
@@ -245,13 +200,9 @@ def _target_mirror_eligible(
     if origin_match:
         return True
     resolved_from = target.get("_resolved_from")
-    if resolved_from == "origin_fallback":
-        # Same activation rules as an origin target: per-job attach wins,
-        # else the global flag. This deliberately restates the precedence
-        # _cron_mirror_delivery_enabled encodes (keep the two in sync): the
-        # sole production caller pre-merges it into `global_mirror`, but the
-        # helper must stay correct standalone — a per-job False must beat a
-        # raw global True for any caller that does not pre-merge.
+    if resolved_from in ("origin_fallback", "home"):
+        # Same precedence as _cron_mirror_delivery_enabled (keep in sync): a per-job False must
+        # beat a global True even for callers that don't pre-merge `global_mirror`.
         per_job = job.get("attach_to_session")
         if isinstance(per_job, bool):
             return per_job
@@ -947,9 +898,26 @@ def _origin_delivery_thread(origin: dict):
     return origin.get("thread_id")
 
 
-def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
-    """Resolve one concrete auto-delivery target for a cron job."""
+def _home_target(platform_name: str, chat_id: str, resolved_from: Optional[str] = None) -> dict:
+    """Target dict for a platform's configured home channel (+ optional mirror provenance)."""
+    target = {
+        "platform": platform_name,
+        "chat_id": chat_id,
+        "thread_id": _get_home_target_thread_id(platform_name)}
+    if resolved_from:
+        target["_resolved_from"] = resolved_from
+    return target
 
+
+def _resolve_single_delivery_target(
+    job: dict, deliver_value: str, *, from_broadcast: bool = False
+) -> Optional[dict]:
+    """Resolve one concrete auto-delivery target for a cron job.
+
+    ``from_broadcast`` marks a bare-platform token that was produced by expanding a broadcast
+    token (``all``) rather than written by the user; broadcast expansions carry no mirror
+    provenance (fan-out is never continuable), while a user-written bare platform token is a
+    deliberate home-channel address and gets the ``home`` tag."""
     origin = _resolve_origin(job)
 
     if deliver_value == "local":
@@ -1041,14 +1009,13 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         }
 
     platform_name = deliver_value
+    home_provenance = None if from_broadcast else "home"
     if origin and origin.get("platform") == platform_name:
         chat_id = _get_home_target_chat_id(platform_name)
         if chat_id:
-            return {
-                "platform": platform_name,
-                "chat_id": chat_id,
-                "thread_id": _get_home_target_thread_id(platform_name),
-            }
+            return _home_target(platform_name, chat_id, home_provenance)
+        # No home configured: falls back to the origin chat. No tag needed — the
+        # origin-match check in _target_mirror_eligible already covers this target.
         return {
             "platform": platform_name,
             "chat_id": str(origin["chat_id"]),
@@ -1058,14 +1025,7 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
     if not _is_known_delivery_platform(platform_name):
         return None
     chat_id = _get_home_target_chat_id(platform_name)
-    if not chat_id:
-        return None
-
-    return {
-        "platform": platform_name,
-        "chat_id": chat_id,
-        "thread_id": _get_home_target_thread_id(platform_name),
-    }
+    return _home_target(platform_name, chat_id, home_provenance) if chat_id else None
 
 
 def _get_bot_chat_delivery_timeout() -> int:
@@ -1256,7 +1216,7 @@ def _normalize_delivery_target_identity(target: Any) -> dict:
     resolved_from = target.get("_resolved_from")
     if resolved_from is not None:
         if type(resolved_from) is not str or resolved_from not in {
-            "origin", "origin_fallback", "explicit",
+            "origin", "origin_fallback", "home", "explicit",
         }:
             raise ValueError("delivery target provenance is invalid")
         normalized["_resolved_from"] = resolved_from
@@ -1391,32 +1351,29 @@ def _resolve_delivery_targets(job: dict, *, for_failure: bool = False) -> List[d
     if deliver == "local":
         return []
 
-    raw_parts = [p.strip() for p in deliver.split(",") if p.strip()]
-
-    # Expand routing intents.
-    parts: List[str] = []
-    for raw in raw_parts:
-        parts.extend(_expand_routing_tokens(raw))
-
     seen = {}
     targets = []
-    for part in parts:
-        target = _resolve_single_delivery_target(job, part)
-        if target is not None:
+    for raw in deliver.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        from_broadcast = raw.lower() in _ROUTING_TOKENS
+        for part in _expand_routing_tokens(raw):
+            target = _resolve_single_delivery_target(job, part, from_broadcast=from_broadcast)
+            if not target:
+                continue
             target = _normalize_delivery_target_identity(target)
             key = (target["platform"].lower(), target["chat_id"], target["thread_id"])
-            if key not in seen:
+            kept = seen.get(key)
+            if kept is None:
                 seen[key] = target
                 targets.append(target)
-            else:
-                # OR-merge resolution provenance on dedup: "origin,all" (either
-                # order) resolving to the same chat must keep the
-                # origin/origin_fallback tag — a mirror-eligible token must not
-                # lose eligibility to token order (see _target_mirror_eligible).
-                kept = seen[key]
-                if _MIRROR_PROVENANCE_RANK.get(str(target.get("_resolved_from") or ""), 0) > \
-                        _MIRROR_PROVENANCE_RANK.get(str(kept.get("_resolved_from") or ""), 0):
-                    kept["_resolved_from"] = target.get("_resolved_from")
+            elif (
+                # Keep origin/origin_fallback/home provenance regardless of broadcast token order.
+                _MIRROR_PROVENANCE_RANK.get(str(target.get("_resolved_from") or ""), 0)
+                > _MIRROR_PROVENANCE_RANK.get(str(kept.get("_resolved_from") or ""), 0)
+            ):
+                kept["_resolved_from"] = target.get("_resolved_from")
     return targets
 
 
@@ -2376,7 +2333,7 @@ def _prepare_target_delivery(
             "Job '%s': delivering to %s:%s thread_id=%s",
             job["id"], platform_name, chat_id, thread_id)
 
-    # Mirror: origin, home FALLBACK for origin-less deliver=origin, or attach_to_session opt-in.
+    # Mirror: origin, origin-less home fallback, user-written home, or explicit-target opt-in.
     origin_target = _target_matches_origin(origin, platform_name, chat_id, thread_id)
     mirror_this_target = mirror_enabled and _target_mirror_eligible(
         job, target, global_mirror=mirror_enabled, origin_match=origin_target)

@@ -256,8 +256,11 @@ def _plan_standalone_telegram_text(message: str, media_files=None) -> tuple[str,
     return formatted, list(chunks), has_html, caption
 
 
-async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False,
-                          force_document=False, receipt_bound=False):
+async def _send_telegram(
+    token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False,
+    force_document=False, url_buttons=None, action_buttons=None, action_button_rows=None, rich_message_html=None,
+    receipt_bound=False,
+):
     """One-shot Telegram Bot API send; parse failures fall back to plain text."""
     receipts = []
     try:
@@ -273,6 +276,19 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = _telegram_thread_kwargs(thread_id)
+        from tools.wisdom_notifications import telegram_notification_markup, try_telegram_rich_notification
+
+        # Rich Bot API responses are not the preregistered formatted text/media plan.
+        # Receipt-bound cron delivery must use the normal path to record exact typed acknowledgements.
+        if rich_message_html and not media_files and not receipt_bound:
+            result = await try_telegram_rich_notification(
+                bot, int_chat_id, rich_message_html, thread_kwargs, disable_link_previews=disable_link_previews,
+            )
+            if result is not None:
+                return result
+        reply_markup = telegram_notification_markup(
+            action_button_rows=action_button_rows, action_buttons=action_buttons, url_buttons=url_buttons,
+        )
         # disable_web_page_preview is only valid for send_message, not media sends.
         text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
         requested_target = TransportTarget("telegram", str(chat_id), str(thread_id) if thread_id is not None else None)
@@ -293,12 +309,17 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             return message_id
         # Dispatch the same chunks used for receipt preregistration.
         for ordinal, chunk in enumerate(text_chunks):
+            chunk_kwargs = dict(text_kwargs)
+            if reply_markup is not None and ordinal == len(text_chunks) - 1:
+                chunk_kwargs["reply_markup"] = reply_markup
             last_msg = await _telegram_send_text_chunk(
-                bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs, receipt_bound=receipt_bound)
+                bot, int_chat_id, chunk, send_parse_mode, _has_html, chunk_kwargs, receipt_bound=receipt_bound)
             if append_receipt(last_msg, component="text", ordinal=ordinal,
-                              actual_thread=(str(thread_id) if text_kwargs.get("message_thread_id") is not None else None)) is None:
+                              actual_thread=(str(thread_id) if chunk_kwargs.get("message_thread_id") is not None else None)) is None:
                 return {"error": "Telegram delivery acknowledgement is invalid", "error_kind": "unknown",
                         "retryable": False, "receipts": tuple(receipts)}
+            if "message_thread_id" not in chunk_kwargs:
+                text_kwargs.pop("message_thread_id", None)
         for media_ordinal, (media_path, is_voice) in enumerate(media_files):
             if not os.path.exists(media_path):
                 warnings.append(f"Media file not found, skipping: {media_path}")
@@ -348,7 +369,13 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
 def _live_adapter(platform, *, lookup_failed_warning=None):
     """``(runner, adapter)`` for the in-process gateway; ``(None, None)`` standalone (cron);
     ``(runner, None)`` when the lookup fails — logged when a warning is given, never silently
-    swallowed (a silent fall-through could recreate a reconnect storm)."""
+    swallowed (a silent fall-through could recreate a reconnect storm).
+
+    Multiplex: the adapter is the ACTIVE PROFILE's (``_profile_adapters[profile]``), never a bare
+    ``runner.adapters`` hit — that map holds the default profile's bots, so a secondary profile's turn
+    would post/react with the default bot's identity. A profile with no adapter for the platform
+    yields ``None`` (fail closed → the caller's scoped standalone sender or an error), never the
+    default bot. Same resolver shape as ``hermes_cli/platform_actions.py::_resolve_adapter``."""
     try:
         from gateway.run import _gateway_runner_ref
         runner = _gateway_runner_ref()
@@ -357,7 +384,11 @@ def _live_adapter(platform, *, lookup_failed_warning=None):
     if runner is None:
         return None, None
     try:
-        return runner, runner.adapters.get(platform)
+        resolve = getattr(runner, "_authorization_adapter", None)
+        if not callable(resolve):  # bare runner stubs without the authz mixin
+            return runner, runner.adapters.get(platform)
+        from hermes_cli.profiles import get_active_profile_name
+        return runner, resolve(platform, get_active_profile_name())
     except Exception:
         if lookup_failed_warning:
             logger.warning(lookup_failed_warning, exc_info=True)
